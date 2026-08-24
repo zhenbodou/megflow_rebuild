@@ -3,7 +3,7 @@
 - 日期：2026-08-24
 - 状态：待用户评审
 - 作者：Claude + douzhenbo
-- 关联：原框架源码 `/data/algorithm_warehouse/megflow`（`coreteam/megflow.git`）
+- 关联：原框架源码 `/data/algorithm_warehouse/bw100_dev/megflow`（`coreteam/megflow.git`；与 `/data/algorithm_warehouse/megflow` 为同一 commit `95f870b`、核心引擎逐字节相同）
 
 ---
 
@@ -38,7 +38,7 @@
 
 ## 2. 框架分析：我们在重写什么
 
-原框架 `/data/algorithm_warehouse/megflow` 是一个 Rust workspace，约 3 万行：
+原框架 `/data/algorithm_warehouse/bw100_dev/megflow` 是一个 Rust workspace，约 3.4 万行：
 
 | 子 crate | 行数 | 职责 | 本书是否重写 |
 |---|---|---|---|
