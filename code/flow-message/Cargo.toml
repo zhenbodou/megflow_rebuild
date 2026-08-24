@@ -1,0 +1,8 @@
+[package]
+name = "flow-message"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false   # 与原版一致：文档示例不作为 doctest 运行
