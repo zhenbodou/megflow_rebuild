@@ -15,6 +15,11 @@ authors = ["douzhenbo", "Claude"]
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 # 类型化错误枚举：替换原版的 anyhow 黑盒（Ch1.1 决策）。
 thiserror = "2"
+# 过程宏三件套（Part 2 起）：proc-macro2 = 编译期把代码当数据的 token 流；
+# syn = 把 token 解析成语法树；quote = 把语法树拼回代码。均为生态最基础的公共 crate。
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
 
 [profile.dev]
 incremental = true

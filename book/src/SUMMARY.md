@@ -18,7 +18,7 @@
 # 第 2 部分 · 节点与过程宏
 
 - [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）](part2/ch01-node-trait.md)
-- [Ch2.2 过程宏入门：proc-macro2 / syn / quote]()
+- [Ch2.2 过程宏入门：proc-macro2 / syn / quote](part2/ch02-proc-macro-intro.md)
 - [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏]()
 - [Ch2.4 node_register! 与 inventory 编译期注册表]()
 

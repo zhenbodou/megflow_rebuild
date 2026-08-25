@@ -7,3 +7,8 @@ license.workspace = true
 [lib]
 proc-macro = true   # 过程宏 crate
 doctest = false
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
