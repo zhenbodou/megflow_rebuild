@@ -20,7 +20,10 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use syn::punctuated::Punctuated;
+use syn::{parse_macro_input, DeriveInput, Ident, ItemImpl, ItemStruct, Token};
+
+mod node;
 
 /// 派生宏 `#[derive(TypeName)]`：给结构体/枚举生成一个返回其类型名的**固有方法**
 /// `const fn type_name() -> &'static str`。
@@ -37,6 +40,45 @@ pub fn derive_type_name(input: TokenStream) -> TokenStream {
     // ② 逻辑：交给可单元测试的纯函数（内部用 proc_macro2::TokenStream）。
     // ③ 边界：.into() 转回 proc_macro::TokenStream 交还编译器。
     expand_type_name(&input).into()
+}
+
+// ── Ch2.3：节点宏入口（薄）。逻辑一律在 `node` 模块，便于单元测试。──
+
+/// 属性宏 `#[inputs(a, b, ..)]`：给节点结构体注入输入端口字段 + 关闭标志。
+#[proc_macro_attribute]
+pub fn inputs(args: TokenStream, item: TokenStream) -> TokenStream {
+    let names = parse_macro_input!(args with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let item = parse_macro_input!(item as ItemStruct);
+    node::expand_inputs(&names.into_iter().collect::<Vec<_>>(), item).into()
+}
+
+/// 属性宏 `#[outputs(a, b, ..)]`：给节点结构体注入输出端口字段。
+#[proc_macro_attribute]
+pub fn outputs(args: TokenStream, item: TokenStream) -> TokenStream {
+    let names = parse_macro_input!(args with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let item = parse_macro_input!(item as ItemStruct);
+    node::expand_outputs(&names.into_iter().collect::<Vec<_>>(), item).into()
+}
+
+/// 属性宏 `#[methods]`：改写节点的固有 impl 块（包装 exec + 补齐生命周期）。
+#[proc_macro_attribute]
+pub fn methods(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as ItemImpl);
+    node::expand_methods(item).into()
+}
+
+/// 派生宏 `#[derive(Node)]`：生成 `impl Node`（close / is_all_input_closed）。
+#[proc_macro_derive(Node)]
+pub fn derive_node(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    node::expand_derive_node(&input).into()
+}
+
+/// 派生宏 `#[derive(Actor)]`：生成 `impl Actor`（三段式 start 循环）。
+#[proc_macro_derive(Actor)]
+pub fn derive_actor(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    node::expand_derive_actor(&input).into()
 }
 
 /// 宏的**逻辑核心**：`DeriveInput` → `proc_macro2::TokenStream`。

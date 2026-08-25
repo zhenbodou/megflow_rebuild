@@ -11,4 +11,5 @@ doctest = false
 [dependencies]
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
-syn = { workspace = true }
+# Ch2.3 起解析 struct/impl 需要 syn 的完整语法（ItemStruct/ItemImpl/ImplItemFn）。
+syn = { workspace = true, features = ["full"] }
