@@ -1,5 +1,9 @@
 //! flow-message —— MegFlow 消息层（重写版）。
 //!
-//! 目前为骨架。消息信封 `Envelope<M>` 与类型擦除将在 Part 1（Ch1.3）实现。
-//! flow-message —— message layer of MegFlow (rewrite). Skeleton for now;
-//! `Envelope<M>` and type erasure arrive in Part 1 (Ch1.3).
+//! 核心类型 `Envelope<M>`（消息信封）与类型擦除的 `AnyEnvelope` / `SealedEnvelope`。
+//! flow-message —— message layer of MegFlow (rewrite): the `Envelope<M>` message
+//! wrapper plus the type-erased `AnyEnvelope` / `SealedEnvelope`.
+
+pub mod envelope;
+
+pub use envelope::{AnyEnvelope, DummyEnvelope, Envelope, EnvelopeInfo, SealedEnvelope};
