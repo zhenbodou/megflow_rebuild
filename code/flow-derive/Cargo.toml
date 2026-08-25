@@ -1,0 +1,9 @@
+[package]
+name = "flow-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true   # 过程宏 crate
+doctest = false

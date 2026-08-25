@@ -1,0 +1,17 @@
+[book]
+title = "从零用 Rust 重写 MegFlow —— 手把手学习型指南"
+authors = ["douzhenbo", "Claude"]
+language = "zh-CN"
+src = "src"
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

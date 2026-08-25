@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["flow-message", "flow-derive", "flow-rs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["douzhenbo", "Claude"]
+
+# 说明：本 workspace 只用 crates.io 公共 crate；不使用原版的 megvii 私有注册表。
+[profile.dev]
+incremental = true

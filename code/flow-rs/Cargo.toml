@@ -1,0 +1,12 @@
+[package]
+name = "flow-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flow-message = { path = "../flow-message" }
+flow-derive = { path = "../flow-derive" }
+
+[lib]
+doctest = false
