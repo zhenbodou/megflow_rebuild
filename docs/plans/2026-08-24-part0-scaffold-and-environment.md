@@ -6,7 +6,7 @@
 
 **Architecture:** 交付物是「一本书 + 一个参考实现」。`book/`（mdbook，中文正文）手把手教读者一步步搭出 `code/`（cargo workspace：`flow-message` / `flow-derive` / `flow-rs`）。本 Part 只做**骨架与环境**：workspace 能 `cargo build`/`cargo test`（暂无单测，Part 1 起才有红-绿 TDD），mdbook 能 `mdbook build` 并渲染 mermaid，且已通过阅读+（尽力）运行原版把目标 API 契约固定下来。真正的引擎代码从 Part 1 开始。
 
-**Tech Stack:** Rust edition 2021（rustc/cargo 1.98）；mdbook 0.4.40 + mdbook-toc 0.15.3 + mdbook-mermaid（待装）；仅使用 crates.io 公共 crate（**不**使用原版的私有 `megvii` 注册表，不链接闭源 `pplcore-*`/`mpp`/`blob-proxy`）。
+**Tech Stack:** Rust edition 2021（rustc/cargo 1.98）；mdbook 0.5.4 + mdbook-toc 0.15.4 + mdbook-mermaid 0.17.1；仅使用 crates.io 公共 crate（**不**使用原版的私有 `megvii` 注册表，不链接闭源 `pplcore-*`/`mpp`/`blob-proxy`）。
 
 **Spec:** `docs/specs/2026-08-24-megflow-rebuild-book-design.md`（本计划实现其 §5 的 Part 0；执行者应同时阅读 spec 与本计划）。
 
@@ -14,7 +14,7 @@
 
 > 以下为全项目级约束，每个 task 的要求都隐含包含本节。数值/名字均从 spec 逐字复制。
 
-- **工具链版本**：rustc/cargo **1.98**；mdbook **0.4.40**；mdbook-toc **0.15.3**；cargo-expand **1.0.119**（均已装）；mdbook-mermaid 需 `cargo install mdbook-mermaid`。
+- **工具链版本**：rustc/cargo **1.98**；mdbook **0.5.4**；mdbook-toc **0.15.4**；mdbook-mermaid **0.17.1**；cargo-expand **1.0.119**（均已装）。
 - **Rust edition**：`code/` 统一 **edition 2021**（原版是 2018，此处为有意的现代化；见 spec §7 优化项）。
 - **crate 命名**：三个 crate 名字**逐字沿用**真实版：`flow-rs` / `flow-message` / `flow-derive`。API / 宏 / 模块名对齐真实 flow-rs 以最大化「可替换」（spec §4、§6）。
 - **依赖来源**：只允许 crates.io 公共 crate。**禁止** `registry = "megvii"` 的私有依赖、禁止 `pplcore-std`/`pplcore-rs`/`mpp`/`blob-proxy`/`stackful`/`pyo3` 等闭源或超范围依赖（spec §1 非目标、§6 诚实边界）。
@@ -444,7 +444,7 @@ git commit -m "Part0: Ch0.1 概念章——dataflow/actor 与 MegFlow 全景（�
 
 1. **工具链安装**（给出确切命令与本书验证过的版本）：
    - rustup / rustc 1.98 / cargo 1.98；`cargo --version` 应显示 1.98。
-   - `cargo install mdbook`（0.4.40）、`cargo install mdbook-toc`（0.15.3）、`cargo install mdbook-mermaid`。
+   - `cargo install mdbook`（0.5.4）、`cargo install mdbook-toc`（0.15.4）、`cargo install mdbook-mermaid`（0.17.1）。
    - `cargo install cargo-expand`（1.0.119，Part 2 调试宏用，可现在装）。
 2. **cargo workspace 讲解**：什么是 workspace、`[workspace] members`、虚拟 manifest、`resolver = "2"`、`workspace.package` 继承、path 依赖。
 3. **一步步建骨架**：贴出 Task 1 的 7 个文件真实内容（`code/Cargo.toml` 及三 crate 的 `Cargo.toml`+`src/lib.rs`），逐个解释——为什么 `flow-derive` 要 `proc-macro = true`、为什么 `doctest = false`、为什么用 edition 2021（对比原版 2018）、为什么只用 crates.io（对比原版 megvii 私有注册表）。

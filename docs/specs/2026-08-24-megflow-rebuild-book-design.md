@@ -285,7 +285,7 @@ megflow-rebuild/
 
 ## 8. 工具链与构建
 
-- rustc/cargo 1.98（已装）、mdbook 0.4.40（已装）、mdbook-toc（已装）。
+- rustc/cargo 1.98（已装）、mdbook 0.5.4（已装）、mdbook-toc 0.15.4（已装）、mdbook-mermaid 0.17.1（已装）。
 - 需装：`mdbook-mermaid`（画架构/数据流图，一条 `cargo install mdbook-mermaid`）。
 - 构建：`cd book && mdbook build`（产出静态站点）；`cd code && cargo test`（参考实现全绿）。
 - CI（可选，后续）：`mdbook test` 校验书中 Rust 代码块 + `cargo test`。
