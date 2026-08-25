@@ -286,7 +286,7 @@ code/
 两个贯穿全书的选择，在这里交代清楚：
 
 - **为什么用 edition 2021（原版是 2018）**：edition 是 Rust 的「语言年份」，决定一批语法与默认行为。**原版引擎三个 crate 都写着 `edition = "2018"`**，而且是在每个 crate 里各写一遍；我们统一用 **2021**，并借 `[workspace.package]` 只写一处。2021 带来的实惠正好都用得上：闭包按字段**分别捕获**（写 async 闭包更省心）、数组直接 `IntoIterator`、prelude 默认引入 `TryFrom`/`TryInto`/`FromIterator`、以及 `resolver = "2"` 成为包的默认。用新 edition 是「实现更简、bug 更少」这个目标的一部分。
-- **为什么只用 crates.io（原版用 megvii 私有注册表）**：原版仓库里散布着 **22 处 `registry = "megvii"`** 的私有依赖，还链着闭源的 `pplcore-*` / `mpp` / `blob-proxy` / `pyo3` / `stackful`。这些东西**别人拿不到、也编不了**。本书的重写**明确禁用**私有注册表与闭源依赖，心智模型里只出现 **crates.io 上的公共 crate**——任何人用一套 stock 工具链就能完整复现。§3.1 那行注释说的就是这件事。
+- **为什么只用 crates.io（原版用 megvii 私有注册表）**：原版引擎仓里散布着 **22 处 `registry = "megvii"`** 的私有依赖，还直接依赖闭源/特殊的 `blob-proxy` / `pyo3` / `stackful`（有栈协程）；而更上层——把引擎真正用起来的算法仓——还会链接闭源的 `pplcore-*` / `mpp` 全家桶（这两者不在引擎仓里，属引擎之上的视觉/硬件层；见 spec §6 边界与 Ch5.1）。这些东西**别人拿不到、也编不了**。本书的重写**明确禁用**私有注册表与闭源依赖，心智模型里只出现 **crates.io 上的公共 crate**——任何人用一套 stock 工具链就能完整复现。§3.1 那行注释说的就是这件事。
 
 ## 4. 建 mdbook 教材骨架（`book/`）
 
@@ -444,7 +444,7 @@ mdbook build          # 产物在 book/book/ 下
 如果你以前建过 `~/.cargo/config`（**无扩展名**的老式配置文件），跑 cargo 时可能看到：
 
 ```text
-warning: both `/home/you/.cargo/config` and `/home/you/.cargo/config.toml` exist. Using `/home/you/.cargo/config`
+warning: both '/home/you/.cargo/config' and '/home/you/.cargo/config.toml' exist. Using '/home/you/.cargo/config'
 ```
 
 原因：cargo 的全局配置早年叫 `~/.cargo/config`（无扩展名），新版改用 `~/.cargo/config.toml`。当**两者都在**时，出于向后兼容，cargo 会**用那个老的、无扩展名的 `config`**（如 warning 末尾 `Using .../config` 所示），并把 `config.toml` **忽略掉**。这就是坑：你以为自己在改 `config.toml`，实际全没生效。
