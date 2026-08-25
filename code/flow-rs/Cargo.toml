@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 flow-message = { path = "../flow-message" }
 flow-derive = { path = "../flow-derive" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
 
 [lib]
 doctest = false

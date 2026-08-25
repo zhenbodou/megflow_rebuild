@@ -9,5 +9,12 @@ license = "Apache-2.0"
 authors = ["douzhenbo", "Claude"]
 
 # 说明：本 workspace 只用 crates.io 公共 crate；不使用原版的 megvii 私有注册表。
+# 依赖版本在此集中锁定，各 crate 用 `.workspace = true` 引用。
+[workspace.dependencies]
+# 异步运行时：替换原版的有栈协程 rt/{spawn_pinned,rwlock}（Ch1.4 起）。
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+# 类型化错误枚举：替换原版的 anyhow 黑盒（Ch1.1 决策）。
+thiserror = "2"
+
 [profile.dev]
 incremental = true
