@@ -270,9 +270,9 @@ bindgen = "0.59"             # ← 构建期还要 bindgen 生成 C 绑定
 
 事实（已核对原版源码）：
 
-- **原版引擎仓里有 22 处 `registry = "megvii"`** 的私有依赖（散布在 flow-rs / flow-message / flow-derive / flow-plugins / flow-cffi 各 crate 的 `Cargo.toml`）。单看 `flow-rs/Cargo.toml` 就有 6 处：`minstant`、`petgraph`、`templar`、`glider-monitor`、`devtools-exporter`、以及连自家的 `flow-derive` 都走私有注册表。
-- 此外还直接依赖 `blob-proxy`（同样在 `registry = "megvii"` 上）、可选的 `pyo3` / `stackful`（Python 绑定 + 有栈协程），以及构建期的 `bindgen`。
-- **这些东西 crates.io 上没有、外部机器拉不到**。所以在没有 megvii 内网与注册表凭证的机器上，`cargo build` / `cargo test` 会在**解析/拉取依赖**这一步就失败，形如（示意）：
+- **原版引擎仓里有 22 处 `registry = "megvii"`** 的私有依赖（分布在 flow-rs(6) / flow-message(4) / flow-plugins(6) / flow-cffi(3) / flow-python(3) 五个 crate 的 `Cargo.toml`；`flow-derive` 自身**没有**私有依赖）。单看 `flow-rs/Cargo.toml` 就有 6 处：`minstant`、`petgraph`、`templar`、`glider-monitor`、`devtools-exporter`、以及连自家的 `flow-derive` 都**经**私有注册表拉取（是 flow-rs 的依赖行写了 `registry = "megvii"`，并非 flow-derive 自己有私有依赖）。
+- 另有几项**可选**依赖：`blob-proxy`（在 flow-message / flow-plugins 里，`registry = "megvii"` 且 `optional = true`——flow-rs 本身并不依赖它）；以及 flow-rs 的 `pyo3` / `stackful` / `numpy`（`optional = true`，藏在 `python` / `cplugin` feature 后，**都是 crates.io 公共 crate**、不走私有注册表）。构建期另有个公共 build-dep `bindgen`（真正门槛是系统 libclang，而非「拉不到」）。
+- **真正卡住构建的是那批非可选的 `registry = "megvii"` 依赖**——flow-rs 里的 `minstant` / `petgraph` / `glider-monitor` / `templar` 与私有拉取的 `flow-derive` 默认就参与构建，而它们 crates.io 上没有、外部机器拉不到。所以在没有 megvii 内网与注册表凭证的机器上，`cargo build` / `cargo test` 会在**解析/拉取依赖**这一步就失败，形如（示意）：
 
 ```text
 error: failed to query replaced source registry `megvii`
@@ -285,7 +285,7 @@ error: failed to query replaced source registry `megvii`
 
 - **原版需内部注册表方能构建；本书以其源码为参照系。** 我们把它的 `lib.rs`、`tests/*` 当作「标准答案」来读、来对齐，而不是把它编译运行当活参照。
 - **我们的重写只用 crates.io 公共依赖，从 Ch1.1 起白手起家。** crate 名沿用 `flow-rs` / `flow-message` / `flow-derive`，edition 用 2021，stable 工具链——任何人一套 stock 环境就能完整复现（这与 Ch0.2 §3.4「只用 crates.io、edition 2021」是同一口径）。
-- 顺带澄清一个常见误解：闭源的 `pplcore-*` / `mpp` 全家桶**不在引擎仓里**——它们属于引擎**之上**的算法仓 / 视觉硬件层（见 spec §6 与 Ch5.1 的边界讨论）。所以「原版难以构建」的**直接**原因是 **megvii 私有注册表 + `blob-proxy` / `pyo3` / `stackful`**，不要把 `pplcore` / `mpp` 记成引擎仓的直接依赖。
+- 顺带澄清一个常见误解：闭源的 `pplcore-*` / `mpp` 全家桶**不在引擎仓里**——它们属于引擎**之上**的算法仓 / 视觉硬件层（见 spec §6 与 Ch5.1 的边界讨论）。所以「原版难以构建」的**直接**原因只有一个：**那批非可选的 `registry = "megvii"` 私有依赖**（`minstant` / `petgraph` / `glider-monitor` / `templar` + 私有拉取的 `flow-derive`）。`pyo3` / `stackful` 只是可选的公共 crate、`bindgen` 只是需要 libclang 的公共 build-dep，都不是拦路主因；更不要把 `pplcore` / `mpp` 记成引擎仓的直接依赖。
 
 ## 4. 验收标准契约表
 
@@ -303,7 +303,7 @@ spec §2.2 把**核心实现**定为 **8 个宏**。其中 **7 个是节点写�
 | 6 | `#[amain]` | 异步 `main` 入口宏 | Ch2.4 |
 | 7 | `#[atest]` | 异步测试宏（Sandbox 测试用） | Ch2.4 |
 
-> 这 7 个是**节点写法宏**；再加上 `#[add_cvt_func]`（类型转换函数注册，用在 Ch4.1），才凑齐 spec §2.2 点名的 **8 个「核心实现」宏**——`#[add_cvt_func]` 因不用于节点写法，没列进上表。其余的 `#[derive(Actor)]` / `#[derive(Parser)]` / `opt_register!` / `resource_register!` **不在**核心集内，按需最小实现或末章指路。
+> 这 7 个是**节点写法宏**；再加上 `#[add_cvt_func]`（类型转换函数注册，用在 Ch4.1），才凑齐 spec §2.2 点名的 **8 个「核心实现」宏**——`#[add_cvt_func]` 因不用于节点写法，没列进上表。其余的 `#[derive(Actor)]` / `#[derive(Parser)]` / `opt_register!` / `resource_register!` / `submit!` / `feature!` **不在**核心集内，按需最小实现或末章指路。
 
 再看**类型 / 建图 / 运行 / 测试 / 配置**这一组契约（`M` 泛指消息类型）：
 
@@ -312,7 +312,7 @@ spec §2.2 把**核心实现**定为 **8 个宏**。其中 **7 个是节点写�
 | 节点方法集 | `fn new(_: String, args: &Args) -> Self`；`async fn exec(&mut self)`；可选 `async fn initialize(&mut self, _: &Context, _: ResourceCollection)`、`async fn finalize(&mut self)` | lib.rs 示例 + spec §2.2 | Ch2.1 / Ch2.3（`initialize`/资源见 Ch4.3） |
 | `Envelope<M>` | `Envelope::new(m)`；`unpack(&mut self) -> M`；`repack<T>(&self, T) -> Envelope<T>`；`repack_inplace(&mut self, M)` | flow-rs `envelope` + spec §2.2 | Ch1.3 |
 | 建图 | `Builder::default().template(TOML).build()?` → `MainGraph` | lib.rs 示例 | Ch3.2 / Ch3.4 |
-| 图对外端口 | `graph.input(name)` / `graph.output(name)`（另有带类型的 `input::<T>` / `output::<T>`） | lib.rs 示例 + `tests/01-subgraph.rs` | Ch3.4 |
+| 图对外端口 | `graph.input::<T>(name)` / `graph.output::<T>(name)`（单个泛型方法，类型可推断时省 turbofish，如示例里的 `graph.input("a")`） | lib.rs 示例 + `tests/01-subgraph.rs` | Ch3.4 |
 | 启动 / 停机 | `graph.start() -> handle`；`graph.stop()`；`handle.await?` | lib.rs 示例 | Ch3.3 |
 | 全局收尾 | `flow_rs::finalize().await`（**≠** 节点的 `finalize` 钩子） | lib.rs 示例 | Ch3.3 / Ch3.4 |
 | 图外收发 | `port.send(Envelope::new(v)).await?`；`port.recv::<T>().await`；`port.close()` | lib.rs 示例 + `tests/01-subgraph.rs` | Ch1.4 / Ch3.4 |
@@ -361,7 +361,7 @@ handle.await?;
 这一章我们把**参照系钉死了**：
 
 - 逐段拆解了原版 `lib.rs` 的**四步上手**——定义节点（Step 1）、Sandbox 单节点测试（Step 2，Ch0.1 没讲的一步）、建图跑通 `1 + 2 == 3`（Step 3），以及非目标的打包（Step 4，仅提及）。
-- 讲清了**依赖边界**：原版靠 22 处 megvii 私有注册表 + `blob-proxy`/`pyo3`/`stackful`/`bindgen` 才能构建，外部跑不动；我们以它的源码为标准答案，重写只用 crates.io、从 Ch1.1 白手起家。
+- 讲清了**依赖边界**：原版默认构建卡在那批非可选的 `registry = "megvii"` 私有依赖上（共 22 处私有依赖分布在 flow-rs/flow-message/flow-plugins/flow-cffi/flow-python；`pyo3`/`stackful` 只是可选公共 crate、`bindgen` 只是需 libclang 的公共 build-dep，都非主因），外部跑不动；我们以它的源码为标准答案，重写只用 crates.io、从 Ch1.1 白手起家。
 - 产出了**验收契约表**：spec §2.2 的 8 个核心宏（7 个节点写法宏 + `#[add_cvt_func]`）+ `Envelope`/建图/运行/`Sandbox`/TOML schema 的完整 API 面，逐条标注了「本书在哪实现」。并明确：`1 + 2 == 3` 端到端跑出 `3` 是 **Ch3.4** 的验收，本章只钉「长什么样」。
 
 读到这儿，你应该能一口气说清：**「我们最终要让什么代码跑出 `3`」，以及为什么原版跑不动、我们却能从零复现。** 参照系立好了。
