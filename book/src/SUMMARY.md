@@ -10,8 +10,8 @@
 
 # 第 1 部分 · 消息与异步地基
 
-- [Ch1.1 Rust 复习：并发下的所有权、借用、生命周期 + 错误处理]()
-- [Ch1.2 泛型、trait、trait 对象 dyn、Any 与 downcast]()
+- [Ch1.1 Rust 复习：并发下的所有权、借用、生命周期 + 错误处理](part1/ch01-rust-review.md)
+- [Ch1.2 泛型、trait、trait 对象 dyn、Any 与 downcast](part1/ch02-traits-dyn.md)
 - [Ch1.3 实现 Envelope 消息信封与类型擦除消息层]()
 - [Ch1.4 async/await、Future、tokio 入门 → channel 封装]()
 
