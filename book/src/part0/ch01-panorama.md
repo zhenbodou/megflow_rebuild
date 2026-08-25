@@ -15,7 +15,7 @@
 
 ### 节点 Node / Actor
 
-一个**拥有状态的处理单元**。你把「做一件事」的逻辑写进它，框架会**反复调用它的 `exec` 方法**——每被调用一次，它就处理一批经过自己的数据。比如一个跟踪节点，`exec` 里读入这一帧的检测框，更新内部维护的轨迹表，再把带轨迹 ID 的结果发出去。
+一个**拥有状态的处理单元**。你把「做一件事」的逻辑写进它，框架会**反复调用它的 `exec` 方法**——每被调用一次，它就处理一份流经自己的数据。比如一个跟踪节点，`exec` 里读入这一帧的检测框，更新内部维护的轨迹表，再把带轨迹 ID 的结果发出去。
 
 **为什么需要**：把「一件事」封成独立单元，各自守着自己的状态（跟踪器要记住上一帧、计数器要记住累计值），互不干扰；增删或替换某个环节，不影响其它环节。
 
@@ -85,7 +85,7 @@ flowchart LR
 
 先看节点长什么样（一个有状态的 actor + 一个 `exec`）：
 
-```rust
+```rust,ignore
 use flow_rs::prelude::*;
 
 // 两个输入端口 a、b，一个输出端口 c，元素类型都是 i32
@@ -93,19 +93,36 @@ use flow_rs::prelude::*;
 #[outputs(c: i32)]
 #[derive(Default, Node)]
 struct BinaryOp {
-    op: char, // 节点自己的状态：这次要做哪种运算
+    op: char, // 节点自己的状态：这次要做哪种运算（由 TOML 的 op="+" 传入）
 }
 
 #[methods]
 impl BinaryOp {
-    // 框架反复调用的 exec：收两个数 → 算 → 发一个数
+    // 构造器：框架按 TOML 里的 args 造节点，把 op="+" 解析进字段
+    fn new(_: String, args: &Args) -> BinaryOp {
+        BinaryOp {
+            op: args["op"].as_str().unwrap().trim().chars().next().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    // 框架反复调用的 exec：收两个数 → 按 op 运算 → 发一个数
     async fn exec(&mut self) {
         if let (Ok(mut ea), Ok(mut eb)) =
             futures_util::join!(self.a.recv(), self.b.recv())
         {
             let (a, b) = (ea.unpack(), eb.unpack());
             // repack：复用原来的信封，只把里面的值换成结果
-            self.c.send(ea.repack(a + b)).await.ok();
+            self.c
+                .send(ea.repack(match self.op {
+                    '+' => a + b,
+                    '-' => a - b,
+                    '*' => a * b,
+                    '/' => a / b,
+                    _ => unreachable!(),
+                }))
+                .await
+                .ok();
         }
     }
 }
@@ -115,7 +132,7 @@ node_register!("BinaryOp", BinaryOp); // 按类型名 "BinaryOp" 注册进注册
 
 再看怎么把它连成一张图、跑起来：
 
-```rust
+```rust,ignore
 use flow_rs::prelude::*;
 
 #[amain]
