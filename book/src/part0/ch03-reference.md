@@ -205,7 +205,7 @@ sequenceDiagram
     Cb-->>Node: 2
     Node->>Node: unpack → 1 + 2 → repack(3)
     Node->>Cc: c.send(3)
-    Cc-->>Main: c.recv::<i32>() → unpack → 3
+    Cc-->>Main: c.recv() → unpack → 3
 ```
 
 #### TOML schema：图是怎么写出来的
@@ -291,9 +291,9 @@ error: failed to query replaced source registry `megvii`
 
 下面这张表，是**全书的验收目标契约**——把参照系（真实 flow-rs 的 BinaryOp）用到的 API 面一条条列清：**它长什么样、出自哪、本书在哪一章把它实现并验收**。Ch2.3（节点宏）、Ch3.4（端到端）都回来对照这张表判断自己是不是「绿」了。
 
-先把**节点写法的 7 个核心宏**单独列出来（这是 Part 2 的主线产物）：
+spec §2.2 把**核心实现**定为 **8 个宏**。其中 **7 个是节点写法宏**，先单独列出来（这是 Part 2 的主线产物）；第 8 个 `#[add_cvt_func]` 属类型转换、不用于节点写法，见表下说明。
 
-| # | 核心宏 | 作用 | 实现于 |
+| # | 节点写法宏 | 作用 | 实现于 |
 |---|---|---|---|
 | 1 | `#[inputs(a: i32, b: i32)]` | 声明输入端口 | Ch2.3 |
 | 2 | `#[outputs(c: i32)]` | 声明输出端口 | Ch2.3 |
@@ -303,7 +303,7 @@ error: failed to query replaced source registry `megvii`
 | 6 | `#[amain]` | 异步 `main` 入口宏 | Ch2.4 |
 | 7 | `#[atest]` | 异步测试宏（Sandbox 测试用） | Ch2.4 |
 
-> 除这 7 个核心宏外，spec §2.2 还列了 `#[add_cvt_func]`（类型转换函数注册，Part 4/Ch4.1）等；`#[derive(Actor)]` / `#[derive(Parser)]` / `opt_register!` / `resource_register!` 等按需最小实现或末章指路，不在核心主线。
+> 这 7 个是**节点写法宏**；再加上 `#[add_cvt_func]`（类型转换函数注册，用在 Ch4.1），才凑齐 spec §2.2 点名的 **8 个「核心实现」宏**——`#[add_cvt_func]` 因不用于节点写法，没列进上表。其余的 `#[derive(Actor)]` / `#[derive(Parser)]` / `opt_register!` / `resource_register!` **不在**核心集内，按需最小实现或末章指路。
 
 再看**类型 / 建图 / 运行 / 测试 / 配置**这一组契约（`M` 泛指消息类型）：
 
@@ -362,7 +362,7 @@ handle.await?;
 
 - 逐段拆解了原版 `lib.rs` 的**四步上手**——定义节点（Step 1）、Sandbox 单节点测试（Step 2，Ch0.1 没讲的一步）、建图跑通 `1 + 2 == 3`（Step 3），以及非目标的打包（Step 4，仅提及）。
 - 讲清了**依赖边界**：原版靠 22 处 megvii 私有注册表 + `blob-proxy`/`pyo3`/`stackful`/`bindgen` 才能构建，外部跑不动；我们以它的源码为标准答案，重写只用 crates.io、从 Ch1.1 白手起家。
-- 产出了**验收契约表**：7 个核心宏 + `Envelope`/建图/运行/`Sandbox`/TOML schema 的完整 API 面，逐条标注了「本书在哪实现」。并明确：`1 + 2 == 3` 端到端跑出 `3` 是 **Ch3.4** 的验收，本章只钉「长什么样」。
+- 产出了**验收契约表**：spec §2.2 的 8 个核心宏（7 个节点写法宏 + `#[add_cvt_func]`）+ `Envelope`/建图/运行/`Sandbox`/TOML schema 的完整 API 面，逐条标注了「本书在哪实现」。并明确：`1 + 2 == 3` 端到端跑出 `3` 是 **Ch3.4** 的验收，本章只钉「长什么样」。
 
 读到这儿，你应该能一口气说清：**「我们最终要让什么代码跑出 `3`」，以及为什么原版跑不动、我们却能从零复现。** 参照系立好了。
 
