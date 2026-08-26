@@ -17,9 +17,10 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::parse::{Parse, ParseStream};
 use syn::{
     parse_quote, Data, DeriveInput, Field, FieldMutability, Ident, ImplItem, ItemImpl, ItemStruct,
-    Type, Visibility,
+    LitStr, Path, Token, Type, Visibility,
 };
 
 /// 造一个「命名字段」`name: ty`（默认可见性）。syn 的 `Field` 不实现 `Parse`
@@ -204,6 +205,82 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
     quote! { #item }
 }
 
+// ── Ch2.4：编译期注册表（`#[derive(BuildFromPorts)]` + `node_register!`）──
+
+/// `#[derive(BuildFromPorts)]`：生成 `impl BuildFromPorts`——「从端口构造节点」。
+///
+/// 按字段声明顺序填充：类型含 `Sender`（即 `Option<Sender>`）→ `Some(outs.remove(0))`；
+/// 含 `Receiver` → `ins.remove(0)`；名为 `input_closed` → `false`；其余 →
+/// `Default::default()`。端口用**位置**对应（本章 1 输入 1 输出足够；命名接线留到
+/// Part 3 的 Graph Builder）。裸名 `Receiver`/`Sender`/`Actor`/`BuildFromPorts` 沿用
+/// Ch2.3 的策略（要求使用处 `use`）。
+pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
+    let name = &input.ident;
+    let (ig, tg, wc) = input.generics.split_for_impl();
+
+    let mut inits = Vec::new();
+    if let Data::Struct(data) = &input.data {
+        for f in data.fields.iter() {
+            let Some(id) = &f.ident else { continue };
+            let init = if type_contains(&f.ty, "Sender") {
+                quote! { Some(outs.remove(0)) }
+            } else if type_contains(&f.ty, "Receiver") {
+                quote! { ins.remove(0) }
+            } else if *id == "input_closed" {
+                quote! { false }
+            } else {
+                quote! { Default::default() }
+            };
+            inits.push(quote! { #id: #init });
+        }
+    }
+
+    quote! {
+        impl #ig BuildFromPorts for #name #tg #wc {
+            fn build(mut ins: Vec<Receiver>, mut outs: Vec<Sender>) -> Box<dyn Actor> {
+                Box::new(#name { #( #inits ),* })
+            }
+        }
+    }
+}
+
+/// `node_register!("Name", Type)` 的参数：注册名（字符串字面量）+ 节点类型路径。
+pub struct NodeRegisterArgs {
+    /// 注册到表里的类型名字符串（TOML 里按它引用节点）。
+    pub name: LitStr,
+    /// 节点类型的路径（`<Type as BuildFromPorts>::build` 从它取构造器）。
+    pub ty: Path,
+}
+
+impl Parse for NodeRegisterArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let name: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let ty: Path = input.parse()?;
+        Ok(NodeRegisterArgs { name, ty })
+    }
+}
+
+/// 函数式宏 `node_register!("Name", Type)`：在编译期提交一条注册。
+///
+/// 生成 `flow_rs::inventory::submit! { flow_rs::registry::NodeRegistration { .. } }`——
+/// 全部用**绝对路径** `flow_rs::`（下游视角）：`submit!` 生成的是 item 级 `static`，不便
+/// 要求使用处 `use`，故不走 Ch2.3 派生宏的裸名策略。这也解释了为什么本 crate 内部
+/// （Part 4 内置节点）用宏时才需要 `proc-macro-crate`——那时 `flow_rs::` 前缀失效、
+/// 得换成 `crate::`。
+pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
+    let name = &args.name;
+    let ty = &args.ty;
+    quote! {
+        flow_rs::inventory::submit! {
+            flow_rs::registry::NodeRegistration {
+                name: #name,
+                ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +371,32 @@ mod tests {
         // 用户自定义的 initialize 保留其函数体，不被默认实现覆盖（只应出现一次）
         assert!(out.contains("self . n = 1"));
         assert_eq!(out.matches("fn initialize").count(), 1);
+    }
+
+    #[test]
+    fn build_from_ports_wires_ports() {
+        // 模拟属性宏跑完后的结构体，验证按字段类型/名字生成的接线。
+        let input: DeriveInput =
+            parse_str("struct D { inp: Receiver, out: Option<Sender>, input_closed: bool }")
+                .unwrap();
+        let out = expand_build_from_ports(&input)
+            .to_string()
+            .replace(' ', "");
+        assert!(out.contains("implBuildFromPortsforD"));
+        assert!(out.contains("inp:ins.remove(0)")); // 输入端口取一个 Receiver
+        assert!(out.contains("out:Some(outs.remove(0))")); // 输出端口取一个 Sender，包 Some
+        assert!(out.contains("input_closed:false")); // 关闭标志初值
+        assert!(out.contains("Box::new(D"));
+    }
+
+    #[test]
+    fn node_register_emits_submit() {
+        let args: NodeRegisterArgs = parse_str("\"D\", D").unwrap();
+        let out = expand_node_register(&args).to_string().replace(' ', "");
+        // 绝对路径提交一条 NodeRegistration，ctor 指向 <D as BuildFromPorts>::build
+        assert!(out.contains("flow_rs::inventory::submit!"));
+        assert!(out.contains("flow_rs::registry::NodeRegistration"));
+        assert!(out.contains("name:\"D\""));
+        assert!(out.contains("BuildFromPorts>::build"));
     }
 }

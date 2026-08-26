@@ -8,3 +8,10 @@
 pub mod channel;
 pub mod error;
 pub mod node;
+pub mod registry;
+
+// 重导出 inventory：`node_register!` 生成的注册代码通过 `flow_rs::inventory::submit!`
+// 定位到本 crate 的注册表，下游无需再单独依赖 inventory。
+// Re-export so `node_register!`-generated code reaches the registry via
+// `flow_rs::inventory`, without the downstream depending on inventory directly.
+pub use inventory;

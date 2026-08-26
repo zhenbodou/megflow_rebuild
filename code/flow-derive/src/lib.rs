@@ -81,6 +81,23 @@ pub fn derive_actor(input: TokenStream) -> TokenStream {
     node::expand_derive_actor(&input).into()
 }
 
+// ── Ch2.4：编译期注册表入口 ──
+
+/// 派生宏 `#[derive(BuildFromPorts)]`：生成「从端口构造节点」的 `impl BuildFromPorts`。
+#[proc_macro_derive(BuildFromPorts)]
+pub fn derive_build_from_ports(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    node::expand_build_from_ports(&input).into()
+}
+
+/// 函数式宏 `node_register!("Name", Type)`：编译期把一条节点注册提交进 inventory 表。
+/// 这是过程宏的**第三种形态**（函数式宏），Ch2.2/2.3 只演示了派生宏与属性宏。
+#[proc_macro]
+pub fn node_register(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as node::NodeRegisterArgs);
+    node::expand_node_register(&args).into()
+}
+
 /// 宏的**逻辑核心**：`DeriveInput` → `proc_macro2::TokenStream`。
 ///
 /// 把「编译期 API 边界」（`proc_macro`，只入口用）与「可测的生成逻辑」

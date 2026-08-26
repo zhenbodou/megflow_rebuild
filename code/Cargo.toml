@@ -20,6 +20,10 @@ thiserror = "2"
 proc-macro2 = "1"
 quote = "1"
 syn = "2"
+# 编译期分布式注册（Part 2 Ch2.4）：各处 `inventory::submit!` 的节点条目，在
+# link 期汇总成一张全局表，运行时 `inventory::iter` 枚举。替换原版自建的
+# `#[flow_rs::ln]` + lazy_static registry —— 用成熟公共 crate，少一套要维护的机制。
+inventory = "0.3"
 
 [profile.dev]
 incremental = true
