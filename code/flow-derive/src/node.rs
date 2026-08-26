@@ -207,29 +207,43 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
 
 // ── Ch2.4：编译期注册表（`#[derive(BuildFromPorts)]` + `node_register!`）──
 
-/// `#[derive(BuildFromPorts)]`：生成 `impl BuildFromPorts`——「从端口构造节点」。
+/// `#[derive(BuildFromPorts)]`：生成 `impl BuildFromPorts`——「从参数+端口构造节点」。
 ///
-/// 按字段声明顺序填充：类型含 `Sender`（即 `Option<Sender>`）→ `Some(outs.remove(0))`；
-/// 含 `Receiver` → `ins.remove(0)`；名为 `input_closed` → `false`；其余 →
-/// `Default::default()`。端口用**位置**对应（本章 1 输入 1 输出足够；命名接线留到
-/// Part 3 的 Graph Builder）。裸名 `Receiver`/`Sender`/`Actor`/`BuildFromPorts` 沿用
-/// Ch2.3 的策略（要求使用处 `use`）。
+/// 一次字段遍历同时干三件事（Ch3.2 相对 Ch2.4 的升级）：
+/// 1. **接线**（位置）：类型含 `Sender`（即 `Option<Sender>`）→ `Some(outs.remove(0))`；
+///    含 `Receiver` → `ins.remove(0)`；名为 `input_closed` → `false`。
+/// 2. **端口名表**（`INPUTS`/`OUTPUTS`）：把上面 `Receiver`/`Sender` 字段的**名字**按
+///    遍历顺序收进两张常量表——与 `build` 消费 `ins`/`outs` 的顺序严格同序。Graph
+///    Builder 靠它把「TOML 里按名接的 channel」排成「构造器要的位置 Vec」。
+/// 3. **自有参数**：其余字段（如 `op: String`）改用 `flow_rs::config::arg(args, "字段名")?`
+///    从节点参数表按字段名反序列化——取代 Ch2.4 的 `Default::default()`。于是 `build`
+///    需要 `&Args` 入参、并返回 `Result`（参数缺失/类型错在此报错）。
+///
+/// 裸名 `Receiver`/`Sender`/`Actor`/`Result`/`BuildFromPorts` 沿用 Ch2.3 的策略（要求
+/// 使用处 `use`）；新引入的 `Args`/`arg` 用**绝对路径** `flow_rs::config::..`，免得再逼
+/// 使用处多写两个 `use`（与 `node_register!` 的绝对路径策略一致）。
 pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
 
     let mut inits = Vec::new();
+    let mut input_names: Vec<LitStr> = Vec::new();
+    let mut output_names: Vec<LitStr> = Vec::new();
     if let Data::Struct(data) = &input.data {
         for f in data.fields.iter() {
             let Some(id) = &f.ident else { continue };
             let init = if type_contains(&f.ty, "Sender") {
+                output_names.push(LitStr::new(&id.to_string(), id.span()));
                 quote! { Some(outs.remove(0)) }
             } else if type_contains(&f.ty, "Receiver") {
+                input_names.push(LitStr::new(&id.to_string(), id.span()));
                 quote! { ins.remove(0) }
             } else if *id == "input_closed" {
                 quote! { false }
             } else {
-                quote! { Default::default() }
+                // 自有参数字段：按字段名从 args 反序列化（配置驱动的构造侧落点）。
+                let key = LitStr::new(&id.to_string(), id.span());
+                quote! { flow_rs::config::arg(args, #key)? }
             };
             inits.push(quote! { #id: #init });
         }
@@ -237,8 +251,14 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
 
     quote! {
         impl #ig BuildFromPorts for #name #tg #wc {
-            fn build(mut ins: Vec<Receiver>, mut outs: Vec<Sender>) -> Box<dyn Actor> {
-                Box::new(#name { #( #inits ),* })
+            const INPUTS: &'static [&'static str] = &[ #( #input_names ),* ];
+            const OUTPUTS: &'static [&'static str] = &[ #( #output_names ),* ];
+            fn build(
+                args: &flow_rs::config::Args,
+                mut ins: Vec<Receiver>,
+                mut outs: Vec<Sender>,
+            ) -> Result<Box<dyn Actor>> {
+                Ok(Box::new(#name { #( #inits ),* }))
             }
         }
     }
@@ -275,6 +295,8 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
         flow_rs::inventory::submit! {
             flow_rs::registry::NodeRegistration {
                 name: #name,
+                inputs: <#ty as flow_rs::registry::BuildFromPorts>::INPUTS,
+                outputs: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUTS,
                 ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
             }
         }
@@ -293,7 +315,9 @@ mod tests {
     #[test]
     fn inputs_injects_receiver_and_flag() {
         let item: ItemStruct = parse_str("struct D {}").unwrap();
-        let out = expand_inputs(&[id("inp")], item).to_string().replace(' ', "");
+        let out = expand_inputs(&[id("inp")], item)
+            .to_string()
+            .replace(' ', "");
         assert!(out.contains("inp:Receiver"));
         assert!(out.contains("input_closed:bool"));
     }
@@ -375,28 +399,54 @@ mod tests {
 
     #[test]
     fn build_from_ports_wires_ports() {
-        // 模拟属性宏跑完后的结构体，验证按字段类型/名字生成的接线。
+        // 模拟属性宏跑完后的结构体，验证按字段类型/名字生成的接线 + 端口名表。
         let input: DeriveInput =
             parse_str("struct D { inp: Receiver, out: Option<Sender>, input_closed: bool }")
                 .unwrap();
-        let out = expand_build_from_ports(&input)
-            .to_string()
-            .replace(' ', "");
+        let out = expand_build_from_ports(&input).to_string().replace(' ', "");
         assert!(out.contains("implBuildFromPortsforD"));
         assert!(out.contains("inp:ins.remove(0)")); // 输入端口取一个 Receiver
         assert!(out.contains("out:Some(outs.remove(0))")); // 输出端口取一个 Sender，包 Some
         assert!(out.contains("input_closed:false")); // 关闭标志初值
-        assert!(out.contains("Box::new(D"));
+                                                     // 端口名表：与填充顺序同序，交给 Graph Builder 做「名字→位置」的桥
+        assert!(out.contains("constINPUTS"));
+        assert!(out.contains("&[\"inp\"]"));
+        assert!(out.contains("constOUTPUTS"));
+        assert!(out.contains("&[\"out\"]"));
+        // build 现在返回 Result、包 Ok
+        assert!(out.contains("->Result<Box<dynActor>>"));
+        assert!(out.contains("Ok(Box::new(D"));
+    }
+
+    #[test]
+    fn build_from_ports_deserializes_arg_fields() {
+        // 多输入 + 输出 + 自有参数：验证 INPUTS/OUTPUTS 按序、arg 字段走 config::arg。
+        let input: DeriveInput = parse_str(
+            "struct D { op: String, a: Receiver, b: Receiver, input_closed: bool, c: Option<Sender> }",
+        )
+        .unwrap();
+        let out = expand_build_from_ports(&input).to_string().replace(' ', "");
+        // 自有参数按字段名从 args 反序列化（取代 Ch2.4 的 Default::default）
+        assert!(out.contains("op:flow_rs::config::arg(args,\"op\")?"));
+        // 端口名表按声明顺序：输入 a、b；输出 c
+        assert!(out.contains("&[\"a\",\"b\"]"));
+        assert!(out.contains("&[\"c\"]"));
+        // 端口仍按位置填，且与名表同序
+        assert!(out.contains("a:ins.remove(0)"));
+        assert!(out.contains("b:ins.remove(0)"));
+        assert!(out.contains("c:Some(outs.remove(0))"));
     }
 
     #[test]
     fn node_register_emits_submit() {
         let args: NodeRegisterArgs = parse_str("\"D\", D").unwrap();
         let out = expand_node_register(&args).to_string().replace(' ', "");
-        // 绝对路径提交一条 NodeRegistration，ctor 指向 <D as BuildFromPorts>::build
+        // 绝对路径提交一条 NodeRegistration，端口名表 + ctor 都指向 <D as BuildFromPorts>::..
         assert!(out.contains("flow_rs::inventory::submit!"));
         assert!(out.contains("flow_rs::registry::NodeRegistration"));
         assert!(out.contains("name:\"D\""));
+        assert!(out.contains("BuildFromPorts>::INPUTS"));
+        assert!(out.contains("BuildFromPorts>::OUTPUTS"));
         assert!(out.contains("BuildFromPorts>::build"));
     }
 }

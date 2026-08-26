@@ -8,6 +8,7 @@
 pub mod channel;
 pub mod config;
 pub mod error;
+pub mod graph;
 pub mod node;
 pub mod registry;
 

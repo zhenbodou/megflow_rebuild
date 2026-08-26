@@ -98,7 +98,10 @@ mod tests {
         let (tx, mut rx) = channel(4);
         tx.send(Envelope::new(1i32)).await.unwrap();
         // 用 matches! 断言错误变体：无需 Envelope<T> 实现 Debug
-        assert!(matches!(rx.recv::<String>().await, Err(Error::TypeMismatch)));
+        assert!(matches!(
+            rx.recv::<String>().await,
+            Err(Error::TypeMismatch)
+        ));
     }
 
     #[tokio::test]

@@ -2,8 +2,8 @@
 //!
 //! Ch1.1 的决策：引擎是库，错误要被调用方 `match`，故用 `thiserror` 定义
 //! 类型化枚举，而非原版的 `anyhow` 黑盒。枚举**按需生长**——每个变体都在被
-//! 真正构造时才加入（避免 dead_code）。Ch1.4 的通道两种 + Ch3.1 的配置两种；
-//! `UnknownNode` 等到 Ch3.2 build() 用到时再补。
+//! 真正构造时才加入（避免 dead_code）。Ch1.4 的通道两种 + Ch3.1 的配置两种 +
+//! Ch3.2 建图校验的一批（跨引用不成立、参数缺失/类型错、暂不支持的接线形态）。
 //! Engine error type. Grows variant-by-variant as they're actually used.
 
 use thiserror::Error;
@@ -25,6 +25,44 @@ pub enum Error {
     /// port reference wasn't of the form "node:port".
     #[error("bad port reference {0:?}, expected \"node:port\"")]
     BadPortRef(String),
+    /// `main` 指向的入口图不存在（Ch3.2 build）。/ entry graph named by `main` is absent.
+    #[error("main graph {0:?} not found")]
+    MainGraphNotFound(String),
+    /// TOML 里的节点类型名在注册表里查不到（Ch3.2 build）。/ node type not in registry.
+    #[error("unknown node type {0:?}")]
+    UnknownNodeType(String),
+    /// 端口引用指向一个 `nodes` 里没有的节点（Ch3.2 build）。/ port ref names an undefined node.
+    #[error("port reference names an undefined node {0:?}")]
+    UnknownNode(String),
+    /// 配置给某节点接了一个它类型上没有的端口（Ch3.2 build）。/ node has no such port.
+    #[error("node {node:?} has no port {port:?}")]
+    UnknownPort {
+        /// 节点实例名。
+        node: String,
+        /// 配置里写的端口名。
+        port: String,
+    },
+    /// 节点类型声明了某端口，但配置从未给它接线（Ch3.2 build）。/ declared port left unwired.
+    #[error("node {node:?} port {port:?} is not connected")]
+    PortNotConnected {
+        /// 节点实例名。
+        node: String,
+        /// 未接线的端口名。
+        port: String,
+    },
+    /// 节点自有参数缺失或类型不符（Ch3.2 `BuildFromPorts::build` 反序列化 `args`）。
+    /// node arg missing or of the wrong type.
+    #[error("bad node arg {key:?}: {msg}")]
+    Arg {
+        /// 出问题的参数键。
+        key: String,
+        /// 具体原因（缺失 / 反序列化错误）。
+        msg: String,
+    },
+    /// 该接线形态本教学子集尚未支持（如图输入扇出，留到 Ch4.1 广播）。
+    /// wiring shape not yet supported in this teaching subset.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// 引擎统一的 `Result` 别名。/ the engine's `Result` alias.

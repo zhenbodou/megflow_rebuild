@@ -42,17 +42,26 @@ pub struct Envelope<M> {
 impl<M> Envelope<M> {
     /// 用默认元信息装一条消息。/ wrap a message with default info.
     pub fn new(msg: M) -> Self {
-        Self { info: EnvelopeInfo::default(), msg: Some(msg) }
+        Self {
+            info: EnvelopeInfo::default(),
+            msg: Some(msg),
+        }
     }
 
     /// 用指定元信息装一条消息。/ wrap a message with the given info.
     pub fn with_info(msg: M, info: EnvelopeInfo) -> Self {
-        Self { info, msg: Some(msg) }
+        Self {
+            info,
+            msg: Some(msg),
+        }
     }
 
     /// 空信封（无载荷）。/ an empty envelope (no payload).
     pub fn empty() -> Self {
-        Self { info: EnvelopeInfo::default(), msg: None }
+        Self {
+            info: EnvelopeInfo::default(),
+            msg: None,
+        }
     }
 
     /// 只读访问元信息。/ read the info.
@@ -76,7 +85,10 @@ impl<M> Envelope<M> {
     /// `Envelope<T>`. This is how a node maps `Envelope<In>` → `Envelope<Out>`
     /// while preserving metadata.
     pub fn repack<T>(&self, msg: T) -> Envelope<T> {
-        Envelope { info: self.info.clone(), msg: Some(msg) }
+        Envelope {
+            info: self.info.clone(),
+            msg: Some(msg),
+        }
     }
 
     /// 原地替换载荷（类型不变）。/ replace the payload in place (same type).
@@ -87,7 +99,10 @@ impl<M> Envelope<M> {
     /// 拿走内部载荷与元信息，留下一个空信封（元信息被克隆保留在新信封里）。
     /// Move the payload out into a new envelope, leaving `self` empty.
     pub fn take(&mut self) -> Envelope<M> {
-        Envelope { info: self.info.clone(), msg: self.msg.take() }
+        Envelope {
+            info: self.info.clone(),
+            msg: self.msg.take(),
+        }
     }
 
     /// 只读借用载荷。空信封会 panic。/ borrow the payload; panics if empty.
@@ -115,7 +130,10 @@ impl<M> Envelope<M> {
 // Envelope is Clone only when its payload is — broadcast (Ch4.1) needs this.
 impl<M: Clone> Clone for Envelope<M> {
     fn clone(&self) -> Self {
-        Envelope { info: self.info.clone(), msg: self.msg.clone() }
+        Envelope {
+            info: self.info.clone(),
+            msg: self.msg.clone(),
+        }
     }
 }
 

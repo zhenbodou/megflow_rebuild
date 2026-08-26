@@ -17,12 +17,35 @@
 //! Pure `text → structs`; cross-reference validation lives in `build()` (Ch3.2).
 
 use crate::error::{Error, Result};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 
 /// 节点参数表：TOML 里 `name`/`ty` 之外的多余键，会被 `flatten` 收进这里。
 /// 等价于 Ch0.3 契约里的 `Args`（原版也用 `toml::value::Table`）。
 /// Extra node keys captured here; same as the reference `Args`.
 pub type Args = toml::value::Table;
+
+/// 从参数表 `args` 里按键名取出并反序列化成 `T`——`#[derive(BuildFromPorts)]` 生成的
+/// `build` 用它填充节点的**自有参数字段**（如 `BinaryOp` 的 `op: String` ← `args["op"]`）。
+///
+/// 这是「配置驱动」在构造侧的落点：`flatten` 在 Ch3.1 把节点私有键兜进 `args`（一个
+/// `key → toml::Value` 的表），这里再把某个键**按目标字段的类型**反序列化回来。缺键、
+/// 或类型对不上（`op` 写成了数字），都归到 `Error::Arg`——于是「参数不对」在 `build()`
+/// 当场报错，而非等到节点运行时才 panic。这正是「校验前移到 build()」的一部分。
+///
+/// Deserialize one node arg by key; missing or wrong-typed → `Error::Arg`.
+pub fn arg<T: DeserializeOwned>(args: &Args, key: &str) -> Result<T> {
+    let value = args.get(key).ok_or_else(|| Error::Arg {
+        key: key.to_owned(),
+        msg: "missing".to_owned(),
+    })?;
+    value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| Error::Arg {
+            key: key.to_owned(),
+            msg: e.to_string(),
+        })
+}
 
 /// 一整份图配置：入口图名 `main` + 若干张图 `graphs`。
 ///
