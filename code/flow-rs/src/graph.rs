@@ -11,6 +11,10 @@
 //! 不存在、类型名查不到、端口引用指向不存在的节点、配置接了节点没有的端口、节点声明
 //! 的端口没接线——全部在 `build()` 当场 `Err`，而非等运行时 panic。
 //!
+//! **Ch3.3 在装配之上加了调度层**：[`MainGraph::start`] 把每个装好的节点 spawn 成一个
+//! tokio 任务、收敛成一个覆盖全图的聚合句柄，[`MainGraph::stop`] 撤掉所有对外输入触发
+//! 优雅停机——`MainGraph` 由此从「静态蓝图」变成「能跑、又能干净停下的机器」。
+//!
 //! 名字↔位置的桥示意（单节点 `add`，两输入 `a`/`b`、一输出 `c`）：
 //!
 //! ```text
@@ -30,6 +34,7 @@ use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
 use std::collections::HashMap;
+use tokio::task::JoinHandle;
 
 /// 建图器：吃一段图拓扑 TOML，产出装配好的 [`MainGraph`]。
 ///
@@ -219,10 +224,57 @@ impl MainGraph {
         self.outputs.keys().map(String::as_str).collect()
     }
 
-    /// 取走装配好的节点，交给调用方 spawn。Ch3.3 会在此之上封装 `start()`——本章先
-    /// 暴露这个最小接缝，好让集成测试手动跑起来、端到端验证接线。
-    /// Take the assembled actors out to be spawned; `start()` wraps this in Ch3.3.
+    /// 取走装配好的节点，交给调用方 spawn。Ch3.3 的 [`start`](Self::start) 就建在
+    /// 这个接缝之上；Ch3.2 的集成测试也用它手动跑起来、端到端验证接线。
+    /// Take the assembled actors out to be spawned; `start()` wraps this.
     pub fn take_actors(&mut self) -> Vec<Box<dyn Actor>> {
         std::mem::take(&mut self.actors)
+    }
+
+    /// 启动整张图：把装配好的每个节点 spawn 成一个 tokio 任务，返回一个覆盖全图的
+    /// **聚合句柄**——它在**所有**节点任务收尾后才 resolve。
+    ///
+    /// 相比 Ch3.2 让调用方 `take_actors()` 再逐个 `actor.start()`、逐个收 `JoinHandle`，
+    /// 这里把「spawn 全部 + join 全部」封成一次调用、收敛成一个句柄。错误怎么抬：
+    /// - 某节点 `exec` 返回 `Err` → 它的任务以该 `Err` 收尾 → 经内层 `?` 原样抬出；
+    /// - 某节点任务 panic 或被取消 → `await` 得 `JoinError` → 经外层 `?` 抬成
+    ///   [`Error::TaskJoin`]。
+    ///
+    /// 逐个顺序 `await` 是安全的：停机是「关闭涟漪」——上游任务一收尾就 drop 掉它到
+    /// 下游的 `Sender`，下游随之 `recv` 到 `ChannelClosed` 而退出，故先 await 谁都不会
+    /// 卡住另一个。配套的优雅停机见 [`stop`](Self::stop)。
+    ///
+    /// Spawn every assembled actor; return one aggregate handle that resolves
+    /// after all node tasks finish. A node `Err` or a task panic propagates out.
+    pub fn start(&mut self) -> JoinHandle<Result<()>> {
+        let handles: Vec<_> = self
+            .take_actors()
+            .into_iter()
+            .map(|actor| actor.start())
+            .collect();
+        tokio::spawn(async move {
+            for handle in handles {
+                // 外层 `?`：任务 panic/取消 → JoinError 抬成 TaskJoin。
+                // 内层 `?`：节点自己返回的 Err 原样抬出。
+                handle.await.map_err(|e| Error::TaskJoin(e.to_string()))??;
+            }
+            Ok(())
+        })
+    }
+
+    /// 停机：丢掉图自己持有的对外输入 `Sender`（本方法**消费 `self`**，顺带把尚未被
+    /// [`take_output`](Self::take_output) 取走的 `Receiver` 一并释放）。
+    ///
+    /// 配合调用方丢掉它从 [`input`](Self::input) 克隆的那些 `Sender`，一条对外输入
+    /// channel 的发送端就全部消失，接在它上面的节点 `recv` 到 `ChannelClosed`、优雅
+    /// 退出，关闭涟漪顺着图一路传导，最终 [`start`](Self::start) 的聚合句柄 resolve。
+    ///
+    /// 效果等价于直接 `drop(graph)`，但给它一个名字，把「停机 = 撤掉所有对外输入」
+    /// 这层意图讲明白——对齐原版 `stop(self)` 的语义。
+    ///
+    /// Drop the graph's retained input senders (consumes `self`), triggering the
+    /// graceful-shutdown ripple once the caller also drops its cloned senders.
+    pub fn stop(self) {
+        // self 在此 drop：inputs 里的 Sender、outputs 里未取走的 Receiver 一并释放。
     }
 }

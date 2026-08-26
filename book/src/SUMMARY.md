@@ -26,7 +26,7 @@
 
 - [Ch3.1 serde / toml 与图 TOML schema → 配置解析层](part3/ch01-config.md)
 - [Ch3.2 Graph Builder：装配节点与 channel](part3/ch02-graph-builder.md)
-- [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机]()
+- [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机](part3/ch03-scheduler.md)
 - [Ch3.4 端到端跑通 BinaryOp（大里程碑）+ Sandbox 测试框架]()
 
 # 第 4 部分 · 内置节点与高级特性

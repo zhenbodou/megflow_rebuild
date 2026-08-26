@@ -3,7 +3,8 @@
 //! Ch1.1 的决策：引擎是库，错误要被调用方 `match`，故用 `thiserror` 定义
 //! 类型化枚举，而非原版的 `anyhow` 黑盒。枚举**按需生长**——每个变体都在被
 //! 真正构造时才加入（避免 dead_code）。Ch1.4 的通道两种 + Ch3.1 的配置两种 +
-//! Ch3.2 建图校验的一批（跨引用不成立、参数缺失/类型错、暂不支持的接线形态）。
+//! Ch3.2 建图校验的一批（跨引用不成立、参数缺失/类型错、暂不支持的接线形态）+
+//! Ch3.3 调度的一种（节点任务 panic/取消）。
 //! Engine error type. Grows variant-by-variant as they're actually used.
 
 use thiserror::Error;
@@ -63,6 +64,11 @@ pub enum Error {
     /// wiring shape not yet supported in this teaching subset.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// 节点任务异常收尾——panic 或被取消，即 tokio `JoinError` 的抬升（Ch3.3 调度）。
+    /// 正常返回 `Err` 的节点不走这里（那是节点自己的错误原样抬出），只有任务本身
+    /// 崩了才落到这个变体。/ a node task panicked or was cancelled (JoinError).
+    #[error("node task join error: {0}")]
+    TaskJoin(String),
 }
 
 /// 引擎统一的 `Result` 别名。/ the engine's `Result` alias.
