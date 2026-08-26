@@ -12,6 +12,9 @@ thiserror = { workspace = true }
 # 编译期节点注册表（Ch2.4）。flow-rs 同时 `pub use inventory`，好让
 # `node_register!` 生成的注册代码用 `flow_rs::inventory::submit!` 定位到本 crate 的表。
 inventory = { workspace = true }
+# 配置解析层（Ch3.1）：serde 派生 Deserialize，toml 把图拓扑文本解析成配置结构。
+serde = { workspace = true }
+toml = { workspace = true }
 
 [lib]
 doctest = false

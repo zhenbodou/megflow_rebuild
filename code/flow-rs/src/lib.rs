@@ -6,6 +6,7 @@
 //! chapter starting in Part 1.
 
 pub mod channel;
+pub mod config;
 pub mod error;
 pub mod node;
 pub mod registry;

@@ -24,6 +24,10 @@ syn = "2"
 # link 期汇总成一张全局表，运行时 `inventory::iter` 枚举。替换原版自建的
 # `#[flow_rs::ln]` + lazy_static registry —— 用成熟公共 crate，少一套要维护的机制。
 inventory = "0.3"
+# 配置解析层（Part 3 Ch3.1）：serde = 通用序列化/反序列化框架（derive 自动派生
+# Deserialize）；toml = 把图拓扑的 TOML 文本解析成类型化的配置结构。均 crates.io 公共。
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [profile.dev]
 incremental = true
