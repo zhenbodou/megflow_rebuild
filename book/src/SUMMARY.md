@@ -40,4 +40,4 @@
 
 - [Ch5.1 对齐真实 API，跑真实算法仓风格的图 + pplcore 边界](part5/ch01-prelude-api-alignment.md)
 - [Ch5.2 优化与更少 bug：逐条对比原版](part5/ch02-optimizations-vs-original.md)
-- [Ch5.3 全景回顾 + 进阶指路]()
+- [Ch5.3 全景回顾 + 进阶指路](part5/ch03-retrospective-and-next-steps.md)
