@@ -118,15 +118,19 @@ impl Builder {
         self
     }
 
-    /// 解析 + 装配：`Config::from_toml` → [`MainGraph::assemble`]。
-    /// 解析失败、跨引用校验失败都在这里返回 `Err`。
-    /// Parse then assemble; parse and cross-reference errors surface here.
+    /// 解析 + 压平 + 装配：`Config::from_toml` → [`subgraph::flatten`] → [`MainGraph::assemble`]。
+    /// 解析失败、子图环、跨引用校验失败都在这里返回 `Err`。
+    ///
+    /// **压平这趟是 Ch4.4 新插的**：把「主图 + 被引用的子图」内联展开成一张扁平图，之后
+    /// `assemble` 一行不改地跑。无子图引用时 `flatten` 是恒等变换，故前几章的单图配置行为不变。
+    /// Parse, flatten subgraphs, then assemble; parse/cycle/cross-reference errors surface here.
     pub fn build(self) -> Result<MainGraph> {
         let text = self
             .template
             .ok_or_else(|| Error::Unsupported("builder has no template".to_owned()))?;
         let config = Config::from_toml(&text)?;
-        MainGraph::assemble(&config)
+        let flat = crate::subgraph::flatten(&config)?;
+        MainGraph::assemble(&flat)
     }
 }
 

@@ -88,6 +88,12 @@ pub enum Error {
     /// resource type name not found in the resource registry.
     #[error("unknown resource type {0:?}")]
     UnknownResourceType(String),
+    /// 子图内联展开时发现环（Ch4.4 flatten）：某张图沿引用链**直接或间接引用了自己**，
+    /// 展开会无限递归。携带那张造成环的图名。注意兄弟式复用（`b1`/`b2` 都引用 `Branch`）
+    /// **不是**环——它们前缀不同、是两份独立实例；只有「引用路径上重复出现同一张图」才是环。
+    /// a subgraph reference cycle was detected while flattening (a graph reaches itself).
+    #[error("subgraph reference cycle through graph {0:?}")]
+    SubgraphCycle(String),
 }
 
 /// 引擎统一的 `Result` 别名。/ the engine's `Result` alias.
