@@ -38,6 +38,6 @@
 
 # 第 5 部分 · 兼容 · 优化 · 收尾
 
-- [Ch5.1 对齐真实 API，跑真实算法仓风格的图 + pplcore 边界]()
+- [Ch5.1 对齐真实 API，跑真实算法仓风格的图 + pplcore 边界](part5/ch01-prelude-api-alignment.md)
 - [Ch5.2 优化与更少 bug：逐条对比原版]()
 - [Ch5.3 全景回顾 + 进阶指路]()
