@@ -19,6 +19,7 @@
 //! scheduler). `start` is non-async → object-safe → `Box<dyn Actor>`. The
 //! async `exec`/lifecycle methods stay as inherent methods, off the trait.
 
+use crate::context::Context;
 use crate::error::Result;
 use tokio::task::JoinHandle;
 
@@ -43,11 +44,18 @@ pub trait Node {
 /// 约定的任务体（本章手写、Ch2.3 起由 `#[derive(Actor)]` 生成）是三段式生命周期：
 /// `initialize → while !is_all_input_closed { exec } → close → finalize`。
 ///
-/// Spawned as a tokio task. `start` is non-async & object-safe.
+/// Ch4.3 给 `start` 加了一个 [`Context`] 参数：图装配期一次建好的**共享资源**
+/// （模型 / 内存池）随它传进来，节点在 `initialize(&ctx)` 里按名借出、暂存到自己的
+/// `#[state]` 字段。`ctx: Context`（`Sized`）不破坏对象安全——`Box<dyn Actor>` 依旧成立。
+/// 注意资源**没有**渗进 `exec`：Ch3.4 那条 `exec(&mut self)` 签名原封不动，几十个节点的
+/// `exec` 无需改动——这正是「把 Context 只穿过 `start`/`initialize`」这个设计的收益。
+///
+/// Spawned as a tokio task. `start` is non-async & object-safe; the `Context`
+/// (Ch4.3) carries shared resources in, consumed at `initialize`, not `exec`.
 pub trait Actor: Node + Send + 'static {
-    /// 把节点交给运行时跑成一个任务，返回其 `JoinHandle`。
-    /// Hand the node to the runtime; return its `JoinHandle`.
-    fn start(self: Box<Self>) -> JoinHandle<Result<()>>;
+    /// 把节点交给运行时跑成一个任务，返回其 `JoinHandle`。`ctx` 携带图的共享资源。
+    /// Hand the node to the runtime; return its `JoinHandle`. `ctx` carries shared resources.
+    fn start(self: Box<Self>, ctx: Context) -> JoinHandle<Result<()>>;
 }
 
 // ── 测试：手写一个 `Doubler` 节点，钉死 exec 循环 + 优雅停机的契约 ──
@@ -56,6 +64,7 @@ pub trait Actor: Node + Send + 'static {
 mod tests {
     use super::*;
     use crate::channel::{channel, Receiver, Sender};
+    use crate::context::Context;
     use crate::error::Error;
     use flow_message::Envelope;
 
@@ -70,9 +79,9 @@ mod tests {
     }
 
     impl Doubler {
-        // 生命周期钩子：Part 3 会给 initialize 传入 &Context / ResourceCollection，
-        // 本章先留空签名，聚焦循环骨架。
-        async fn initialize(&mut self) {}
+        // 生命周期钩子：Ch4.3 起 initialize 收下 `&Context`——节点在这里按名借出共享
+        // 资源、暂存到自己的字段。Doubler 不用资源，故签名收下但忽略（`_ctx`）。
+        async fn initialize(&mut self, _ctx: &Context) {}
         async fn finalize(&mut self) {}
 
         // 真正的「一次处理」：收一条、翻倍、发一条。收到关闭就记下标志。
@@ -101,9 +110,9 @@ mod tests {
     }
 
     impl Actor for Doubler {
-        fn start(mut self: Box<Self>) -> JoinHandle<Result<()>> {
+        fn start(mut self: Box<Self>, ctx: Context) -> JoinHandle<Result<()>> {
             tokio::spawn(async move {
-                self.initialize().await;
+                self.initialize(&ctx).await;
                 while !self.is_all_input_closed() {
                     self.exec().await?;
                 }
@@ -123,7 +132,7 @@ mod tests {
             out: Some(out_tx),
             input_closed: false,
         });
-        let handle = node.start();
+        let handle = node.start(Context::anonymous());
 
         // 喂 3 条，随后关闭输入端（drop 掉唯一的 Sender）
         for v in [1i32, 2, 3] {
@@ -152,7 +161,7 @@ mod tests {
             out: Some(out_tx),
             input_closed: false,
         });
-        let handle = actor.start();
+        let handle = actor.start(Context::anonymous());
 
         in_tx.send(Envelope::new(21i32)).await.unwrap();
         let mut e = out_rx.recv::<i32>().await.unwrap();

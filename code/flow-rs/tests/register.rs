@@ -14,6 +14,7 @@
 use flow_derive::{inputs, methods, node_register, outputs, Actor, BuildFromPorts, Node};
 use flow_message::Envelope;
 use flow_rs::channel::{channel, Receiver, Sender};
+use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
 use flow_rs::node::{Actor, Node};
 use flow_rs::registry::{find, registrations, BuildFromPorts};
@@ -62,7 +63,7 @@ async fn build_via_registry_and_run() {
     )
     .unwrap();
 
-    let handle = node.start();
+    let handle = node.start(Context::anonymous());
     for v in [1i32, 2, 3] {
         in_tx.send(Envelope::new(v)).await.unwrap();
     }

@@ -25,6 +25,7 @@
 
 use crate::channel::{channel, Receiver, Sender};
 use crate::config::Args;
+use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
@@ -159,7 +160,10 @@ impl Sandbox {
         self.inputs.clear();
         self.outputs.clear();
 
-        let node = actor.start();
+        // 沙箱不注入任何共享资源：给节点一个空 `Context`（Ch4.3）。于是「依赖某资源」的
+        // 节点在沙箱里会拿到 `None`、优雅降级（如 Tally 少了计数器就只转发不计数）——单节点
+        // 测试聚焦端口行为，共享资源的真正验证留给 graph 端到端测试。
+        let node = actor.start(Context::anonymous());
         let sub_handles: Vec<_> = subs.into_iter().map(tokio::spawn).collect();
         for handle in sub_handles {
             handle.await.map_err(|e| Error::TaskJoin(e.to_string()))?;

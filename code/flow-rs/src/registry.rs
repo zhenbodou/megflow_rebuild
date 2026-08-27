@@ -26,6 +26,7 @@
 use crate::channel::{Receiver, Sender};
 use crate::error::Result;
 use crate::node::Actor;
+use crate::resource::AnyResource;
 
 /// 节点构造器：吃**节点参数表** + **分组**的输入端口 + **分组**的输出端口，产出类型擦除的
 /// `Box<dyn Actor>`（失败 → `Err`）。
@@ -130,4 +131,39 @@ pub fn registrations() -> impl Iterator<Item = &'static NodeRegistration> {
 /// Look up one registration by type name.
 pub fn find(name: &str) -> Option<&'static NodeRegistration> {
     registrations().find(|r| r.name == name)
+}
+
+// ── 资源注册表（Ch4.3）─────────────────────────────────────────────────────
+// 与上面的节点注册表**对偶**，但简单得多：资源没有端口、没有 arity，只有「类型名 → 构造器」。
+// 构造器吃一份配置参数 `args`、产出类型擦除的 [`AnyResource`]（`Arc<dyn Any+Send+Sync>`）。
+// 复用同一套 [`inventory`] 机制：`resource_register!`（flow-derive）在**任意 crate** `submit!`
+// 一条条目，link 期汇成一张全局表，`find_resource` 按名查出。
+// A dual, simpler registry for resources: name → constructor, same `inventory` backing.
+
+/// 资源构造器：吃配置参数、产出类型擦除的共享资源（失败 → `Err`）。裸函数指针，可 const 构造。
+/// A resource constructor: args in, type-erased shared resource (or error) out.
+pub type ResCtor = fn(&crate::config::Args) -> Result<AnyResource>;
+
+/// 资源注册表的一条条目：类型名 + 构造器。对偶于 [`NodeRegistration`]，但没有端口/arity 信息。
+/// One resource-registry entry: type name + constructor (dual to `NodeRegistration`).
+pub struct ResourceRegistration {
+    /// 资源类型名——TOML 的 `[[graphs]].resources` 里按它引用（注册表 key）。
+    pub ty: &'static str,
+    /// 该类型的构造器（`resource::build_arc::<T>`）。
+    pub ctor: ResCtor,
+}
+
+// 声明「本 crate 收集 `ResourceRegistration` 条目」。各处 `resource_register!` 的条目 link 期汇入。
+inventory::collect!(ResourceRegistration);
+
+/// 枚举所有已注册资源类型（link 期汇总的全局表）。
+/// Iterate over every registered resource type.
+pub fn resource_registrations() -> impl Iterator<Item = &'static ResourceRegistration> {
+    inventory::iter::<ResourceRegistration>.into_iter()
+}
+
+/// 按类型名查一条资源注册。Graph Builder 用它把 `resources` 里的 `ty` 解析成构造器。
+/// Look up one resource registration by type name.
+pub fn find_resource(ty: &str) -> Option<&'static ResourceRegistration> {
+    resource_registrations().find(|r| r.ty == ty)
 }

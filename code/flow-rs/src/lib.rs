@@ -18,10 +18,12 @@ extern crate self as flow_rs;
 pub mod builtin;
 pub mod channel;
 pub mod config;
+pub mod context;
 pub mod error;
 pub mod graph;
 pub mod node;
 pub mod registry;
+pub mod resource;
 pub mod sandbox;
 
 // 重导出 inventory：`node_register!` 生成的注册代码通过 `flow_rs::inventory::submit!`

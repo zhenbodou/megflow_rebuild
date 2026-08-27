@@ -30,9 +30,11 @@
 
 use crate::channel::{channel, Receiver, Sender};
 use crate::config::{Config, GraphConfig, PortRef};
+use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
+use crate::resource::{AnyResource, ResourceCollection};
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
 
@@ -128,18 +130,25 @@ impl Builder {
     }
 }
 
-/// 装配好的主图：一组待运行的节点 + 对外输入/输出句柄。
+/// 装配好的主图：一组待运行的节点 + 对外输入/输出句柄 + 图的共享资源。
 ///
 /// - `actors`：造好、接好线的节点，等着被 spawn（Ch3.3 的 `start()` 会接手）。
+/// - `node_names`：与 `actors` **同序**的节点实例名（Ch4.3）——`start()` 用它为每个节点
+///   构造带名字的 [`Context`]，好让日志/资源借用能认得「我是谁」。
 /// - `inputs`：对外**输入**句柄 `名字 → Sender`——用户 `input(name)` 拿到它往图里发。
 /// - `outputs`：对外**输出**句柄 `名字 → Receiver`——用户 `take_output(name)` 拿到它从图里收。
+/// - `resources`：图的**共享资源集**（Ch4.3）——装配期一次建好、`start()` 时随 `Context`
+///   分发给每个节点；`MainGraph` 自己也留一份（`ResourceCollection` 是 `Arc` 共享的廉价克隆），
+///   于是测试能在图跑完后 `graph.resource::<T>(..)` 读回同一个实例、验证「只造了一份」。
 ///
 /// 注意方向：对外输入的 `Sender` 由用户持有、对应的 `Receiver` 接到某节点的输入端口；
 /// 对外输出反过来——节点的输出端口持有 `Sender`、对应的 `Receiver` 交给用户。
 pub struct MainGraph {
     actors: Vec<Box<dyn Actor>>,
+    node_names: Vec<String>,
     inputs: HashMap<String, Sender>,
     outputs: HashMap<String, Receiver>,
+    resources: ResourceCollection,
 }
 
 // `Box<dyn Actor>` 不实现 `Debug`，无法 `#[derive]`；手写一个「摘要式」Debug——打印节点
@@ -307,10 +316,28 @@ impl MainGraph {
             actors.push((reg.ctor)(&nd.args, ins, outs)?);
         }
 
+        // 图的**共享资源**（Ch4.3）：按 `ty` 查资源注册表、`(ctor)(args)` 造一份类型擦除的
+        // `Arc<dyn Any+..>`，按 `name` 收进一张表。查不到该资源类型 → `UnknownResourceType`
+        // （与节点的 `UnknownNodeType` 对偶）。这一步只在装配期跑一次——「构造一次、多处共享」
+        // 的「一次」就落在这里；分发到各节点的「多处」落在 `start()`。
+        let mut res_map: HashMap<String, AnyResource> = HashMap::new();
+        for rc in &g.resources {
+            let reg = registry::find_resource(&rc.ty)
+                .ok_or_else(|| Error::UnknownResourceType(rc.ty.clone()))?;
+            res_map.insert(rc.name.clone(), (reg.ctor)(&rc.args)?);
+        }
+        let resources = ResourceCollection::from_map(res_map);
+
+        // 与 `actors` 同序的节点名（`actors` 就是按 `g.nodes` 顺序 push 的）——`start()` 靠
+        // 这层同序把「名字」zip 回「节点」，为每个节点造带名字的 `Context`。
+        let node_names: Vec<String> = g.nodes.iter().map(|n| n.name.clone()).collect();
+
         Ok(MainGraph {
             actors,
+            node_names,
             inputs,
             outputs,
+            resources,
         })
     }
 
@@ -352,17 +379,26 @@ impl MainGraph {
     /// - 某节点任务 panic 或被取消 → `await` 得 `JoinError` → 经外层 `?` 抬成
     ///   [`Error::TaskJoin`]。
     ///
+    /// Ch4.3：每个节点 `start` 时收一份 [`Context`]——把它自己的实例名 + 图的共享资源集
+    /// （`self.resources` 的廉价 `Arc` 克隆）带进去，节点在 `initialize(&ctx)` 里按名借出
+    /// 资源。`node_names` 与 `take_actors()` 同序，`zip` 即对齐；`resources` 只克隆
+    /// 不搬走（`self` 留着那份），故图跑完后仍能 [`resource`](Self::resource) 读回同一实例。
+    ///
     /// 逐个顺序 `await` 是安全的：停机是「关闭涟漪」——上游任务一收尾就 drop 掉它到
     /// 下游的 `Sender`，下游随之 `recv` 到 `ChannelClosed` 而退出，故先 await 谁都不会
     /// 卡住另一个。配套的优雅停机见 [`stop`](Self::stop)。
     ///
     /// Spawn every assembled actor; return one aggregate handle that resolves
-    /// after all node tasks finish. A node `Err` or a task panic propagates out.
+    /// after all node tasks finish. Each actor gets a `Context` (its name + the
+    /// shared resources). A node `Err` or a task panic propagates out.
     pub fn start(&mut self) -> JoinHandle<Result<()>> {
+        let resources = self.resources.clone();
+        let names = std::mem::take(&mut self.node_names);
         let handles: Vec<_> = self
             .take_actors()
             .into_iter()
-            .map(|actor| actor.start())
+            .zip(names)
+            .map(|(actor, name)| actor.start(Context::new(name, resources.clone())))
             .collect();
         tokio::spawn(async move {
             for handle in handles {
@@ -372,6 +408,19 @@ impl MainGraph {
             }
             Ok(())
         })
+    }
+
+    /// 按名字 + 类型借出图的一个共享资源（Ch4.3）：类型不符或查无此名 → `None`。
+    ///
+    /// 与节点在 `Context` 里拿到的是**同一个** `Arc<T>`（`ResourceCollection` 是 `Arc`
+    /// 共享的）。这让调用方/测试能在图外读回资源的运行时状态——例如图跑完后读一个共享
+    /// 计数器，验证「多个节点确实共用了同一份实例」而非各造各的。
+    /// Borrow one shared resource by name + type; `None` on type/name mismatch.
+    pub fn resource<T: std::any::Any + Send + Sync>(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<T>> {
+        self.resources.get(name)
     }
 
     /// 停机：丢掉图自己持有的对外输入 `Sender`（本方法**消费 `self`**，顺带把尚未被

@@ -14,15 +14,25 @@
 //! `flow_rs` 默认并不指向自己。解法是在 `lib.rs` 加一行 `extern crate self as flow_rs;`——
 //! 给自己起个别名。加上它之后，连下面这些 `use flow_rs::...` 都能照抄下游用户的写法。
 //!
+//! **Ch4.3 再添一对 `Counter`（共享资源）+ `Tally`（用它的节点）**：演示「构造一次、`Arc`
+//! 共享给多个节点」的资源机制，以及节点如何用 `#[state]` 字段 + `initialize(&ctx)` 拿到句柄。
+//!
 //! The first built-in node shipped with the engine. `extern crate self as flow_rs`
 //! (in lib.rs) makes the macro-generated `flow_rs::` paths resolve inside the crate.
+//! Ch4.3 adds `Counter` (a shared resource) + `Tally` (a node that borrows it).
 
-use flow_derive::{inputs, methods, node_register, outputs, Actor, BuildFromPorts, Node};
+use flow_derive::{
+    inputs, methods, node_register, outputs, resource_register, Actor, BuildFromPorts, Node,
+};
 use flow_message::Envelope;
 use flow_rs::channel::{Receiver, Sender};
+use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
 use flow_rs::node::{Actor, Node};
 use flow_rs::registry::BuildFromPorts;
+use flow_rs::resource::BuildResource;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// 二元整数运算节点：从输入端口 `a`、`b` 各取一个 `i32`，按参数 `op` 运算，结果发往
 /// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"`；其余值 → `Err(Error::Arg)`。
@@ -216,3 +226,114 @@ impl Merge {
 }
 
 node_register!("Merge", Merge);
+
+// ── Ch4.3：共享资源 `Counter` + 用它的节点 `Tally` ──────────────────────────────
+// 到这里为止，节点的所有字段要么是端口、要么是「从 args 反序列化的自有参数」——每个节点
+// 实例各造各的。但真实算法仓里有一类东西**必须多个节点共用同一份**：一个几百 MB 的检测
+// 模型、一块预分配的内存池。给每个流各造一份既费内存又费加载时间。Ch4.3 的答案是**资源**：
+// 装配期**构造一次**，通过 `Arc` 把同一份**共享**给声明要用它的每个节点。
+//
+// 下面用一个最小、可断言的资源 `Counter`（一个原子计数器）替身来演示这套机制——把它换成
+// 「模型」或「内存池」，代码骨架一字不变。
+
+/// 一个最小的共享资源：线程安全的原子计数器。多个节点共用**同一个** `Counter`，各自 `bump()`
+/// 累加到同一个数上——这正是「共享模型 / 内存池」的可断言替身（`get()` 能在图外读回总数）。
+///
+/// 为什么字段是 `AtomicU64` 而非 `u64`？因为资源是通过 `Arc<Counter>`（**共享引用**，非独占）
+/// 被多个并发节点持有的——拿不到 `&mut`，只能用**内部可变性**。原子类型让「读引用也能改值」
+/// 且无需锁，是共享计数最省的选择。
+///
+/// A minimal shared resource: a thread-safe atomic counter (stand-in for a shared model/pool).
+pub struct Counter {
+    count: AtomicU64,
+}
+
+impl Counter {
+    /// 计数 +1，返回自增**后**的值。`Relaxed`：只要计数最终正确、不与其他内存操作定序，
+    /// 单个计数器用最宽松的内存序即可。
+    /// Increment by one, return the new value.
+    pub fn bump(&self) -> u64 {
+        self.count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// 读当前计数。/ read the current count.
+    pub fn get(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
+/// 让 `Counter` 成为可注册资源：`build` 从配置参数造一份初值。
+///
+/// 对照 Ch1.3 的关键教学点：那里为了让**封箱消息**能被类型擦除地 `clone`，我们**自定义**了
+/// 一个 `AnyEnvelope` trait（带 `clone_box`）——因为标准库的 `Any` 给不了「克隆」这种行为。
+/// 而资源**不需要任何自定义行为**：装配期造一次、之后只读地共享，标准库的
+/// `Arc<dyn Any + Send + Sync>::downcast` 就够了（见 `resource.rs`）。所以 `BuildResource`
+/// 只有一个「怎么造」的 `build`，没有 `clone_box` 之类——**需求决定抽象**，这份对照本身就是本章的一课。
+///
+/// Make `Counter` a registrable resource; only `build` is needed — no custom vtable
+/// (contrast Ch1.3's `AnyEnvelope`, which needed `clone_box`).
+impl BuildResource for Counter {
+    fn build(_args: &flow_rs::config::Args) -> Result<Self> {
+        // 这个替身不读任何参数；真实资源会在这里读 `args`（模型路径、池容量……）。
+        Ok(Counter {
+            count: AtomicU64::new(0),
+        })
+    }
+}
+
+// 把 "Counter" 这个类型名登进**资源注册表**（与 `node_register!` 对偶）。TOML 的
+// `[[graphs]].resources` 里写 `ty="Counter"` 就能造出它。
+resource_register!("Counter", Counter);
+
+/// 计数转发节点：把从 `inp` 收到的每条消息原样转发到 `out`，**顺带**在共享的 `Counter` 上 `bump()`。
+///
+/// 它示范一个节点**怎么拿到并使用共享资源**，全套只有三个动作：
+/// 1. 用一个**自有参数** `res: String` 记下「我要用的资源叫什么名字」（TOML 里 `res="counter"`）；
+/// 2. 用一个 `#[state]` 字段 `counter: Option<Arc<Counter>>` 存放**运行期**才拿到的资源句柄——
+///    `#[state]` 告诉 `#[derive(BuildFromPorts)]`：这个字段**不**从 args 反序列化，而是
+///    `Default::default()`（即 `None`）初始化，留到运行期填；
+/// 3. 在 `initialize(&ctx)` 里按名 `ctx.resource::<Counter>(&self.res)` 借出、存进那个字段。
+///
+/// 关键设计：资源只穿过 `initialize`，**没有**渗进 `exec`——Ch3.4 那条 `exec(&mut self)` 签名
+/// 原封不动。多个 `Tally` 实例（`res` 都填 `"counter"`）会拿到**同一个** `Arc<Counter>`，`bump()`
+/// 累加到同一个数上：这就是「共享」。若资源不存在（如沙箱里），`counter` 保持 `None`，节点
+/// **优雅降级**为纯转发——`if let Some(c) = ..` 正是为此。
+///
+/// A tally-and-forward node: borrows a shared `Counter` at `initialize`, bumps it per message.
+#[inputs(inp)]
+#[outputs(out)]
+#[derive(Node, Actor, BuildFromPorts)]
+pub struct Tally {
+    /// 自有参数：要借用的资源名（TOML 里 `res="counter"`）。由 `#[derive(BuildFromPorts)]`
+    /// 从 args 填充。
+    res: String,
+    /// 运行期资源句柄：`#[state]` → 不从 args 来，`Default::default()`（`None`）初始化，
+    /// 在 `initialize` 里按 `res` 名从 `Context` 借出后填入。
+    #[state]
+    counter: Option<Arc<Counter>>,
+}
+
+#[methods]
+impl Tally {
+    async fn initialize(&mut self, ctx: &Context) {
+        // 按名 + 类型借出共享资源。借到 → Some(Arc<Counter>)，多个节点借到的是同一个；
+        // 名字错/图里没这个资源 → None，节点降级为纯转发。
+        self.counter = ctx.resource::<Counter>(&self.res);
+    }
+
+    async fn exec(&mut self) -> Result<()> {
+        // 收一条封箱消息。输入关闭 → `?` 交给 `#[methods]` 包装收工。
+        let msg = self.inp.recv_any().await?;
+        // 有资源就 bump（先记账，再转发——e2e 测试据此在收满 N 条后断言总数恰为 N）。
+        if let Some(c) = self.counter.as_ref() {
+            c.bump();
+        }
+        // `out` 是 Option<Sender>——close() 会把它置 None。仍在时才转发。
+        if let Some(out) = self.out.as_ref() {
+            out.send_any(msg).await?;
+        }
+        Ok(())
+    }
+}
+
+node_register!("Tally", Tally);

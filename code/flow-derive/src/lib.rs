@@ -87,7 +87,12 @@ pub fn derive_actor(input: TokenStream) -> TokenStream {
 // ── Ch2.4：编译期注册表入口 ──
 
 /// 派生宏 `#[derive(BuildFromPorts)]`：生成「从端口构造节点」的 `impl BuildFromPorts`。
-#[proc_macro_derive(BuildFromPorts)]
+///
+/// `attributes(state)` 声明它识别一个**惰性辅助属性** `#[state]`（Ch4.3）：被标注的字段
+/// 不从 `args` 反序列化，而是 `Default::default()` 初始化——用于「运行期由 `initialize`
+/// 填入」的状态字段（如资源句柄 `Option<Arc<T>>`）。辅助属性本身不生成代码、也是**惰性**的
+/// （对其他宏透明），只是让 `#[derive(BuildFromPorts)]` 展开时能读到它、对该字段区别处理。
+#[proc_macro_derive(BuildFromPorts, attributes(state))]
 pub fn derive_build_from_ports(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     node::expand_build_from_ports(&input).into()
@@ -99,6 +104,15 @@ pub fn derive_build_from_ports(input: TokenStream) -> TokenStream {
 pub fn node_register(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as node::NodeRegisterArgs);
     node::expand_node_register(&args).into()
+}
+
+/// 函数式宏 `resource_register!("Name", Type)`：编译期把一条**资源**注册提交进 inventory 表
+/// （Ch4.3）。与 `node_register!` 对偶——复用同一套 `NodeRegisterArgs` 解析（名字 + 类型
+/// 路径），但生成的是 `ResourceRegistration`，`ctor` 指向 `flow_rs::resource::build_arc::<Type>`。
+#[proc_macro]
+pub fn resource_register(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as node::NodeRegisterArgs);
+    node::expand_resource_register(&args).into()
 }
 
 /// 宏的**逻辑核心**：`DeriveInput` → `proc_macro2::TokenStream`。

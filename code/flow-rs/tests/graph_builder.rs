@@ -14,6 +14,7 @@
 use flow_derive::{inputs, methods, node_register, outputs, Actor, BuildFromPorts, Node};
 use flow_message::Envelope;
 use flow_rs::channel::{Receiver, Sender};
+use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
 use flow_rs::graph::Builder;
 use flow_rs::node::{Actor, Node};
@@ -85,7 +86,10 @@ async fn builds_and_runs_binary_op() {
     // 取出装好的 actor 手动跑起来（Ch3.3 会把这步封装进 graph.start()）。
     let actors = g.take_actors();
     assert_eq!(actors.len(), 1);
-    let handles: Vec<_> = actors.into_iter().map(|a| a.start()).collect();
+    let handles: Vec<_> = actors
+        .into_iter()
+        .map(|a| a.start(Context::anonymous()))
+        .collect();
 
     // 从对外输入喂 1、2；从对外输出收 3——名字↔位置的桥若接反，这里立刻变红。
     let a_in = g.input("a").unwrap();

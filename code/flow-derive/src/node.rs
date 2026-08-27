@@ -171,14 +171,21 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
 /// `#[derive(Actor)]`：生成 `impl Actor`——固定的三段式 `start` 循环。
 /// 它只调用固有方法（`initialize`/`exec`/`finalize`）与 `Node` 的
 /// `is_all_input_closed`/`close`，故几乎是常量模板，仅按类型名 + 泛型参数化。
+///
+/// Ch4.3 起 `start` 多收一个 `ctx: Context` 参数并 `move` 进 spawn 出的 future，只在
+/// `initialize(&ctx)` 一处传入——`exec`/`finalize` 签名一律不变（几十个节点的 `exec` 一个不改，
+/// 这正是把 `Context` **只穿过 `initialize`** 的意义所在）。
 pub fn expand_derive_actor(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
     quote! {
         impl #ig Actor for #name #tg #wc {
-            fn start(mut self: Box<Self>) -> tokio::task::JoinHandle<Result<()>> {
+            fn start(
+                mut self: Box<Self>,
+                ctx: flow_rs::context::Context,
+            ) -> tokio::task::JoinHandle<Result<()>> {
                 tokio::spawn(async move {
-                    self.initialize().await;
+                    self.initialize(&ctx).await;
                     while !self.is_all_input_closed() {
                         self.exec().await?;
                     }
@@ -239,7 +246,7 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
     // ③ 补齐缺失的生命周期默认实现。
     if !has_init {
         new_items.push(parse_quote!(
-            async fn initialize(&mut self) {}
+            async fn initialize(&mut self, _ctx: &flow_rs::context::Context) {}
         ));
     }
     if !has_final {
@@ -287,7 +294,14 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     if let Data::Struct(data) = &input.data {
         for f in data.fields.iter() {
             let Some(id) = &f.ident else { continue };
-            let init = if type_contains(&f.ty, "Sender") {
+            // `#[state]`（Ch4.3）：运行期**状态字段**（如资源句柄 `Option<Arc<T>>`），不从
+            // `args` 反序列化，而是 `Default::default()` 初始化，留给 `initialize(&ctx)` 在运行时
+            // 填入。这一判断必须排在下面「自有参数」else 分支**之前**——否则 `Option<Arc<Counter>>`
+            // 会被当成参数字段、去 `args` 里找一个叫该字段名的键，运行必失败。
+            let is_state = f.attrs.iter().any(|a| a.path().is_ident("state"));
+            let init = if is_state {
+                quote! { Default::default() }
+            } else if type_contains(&f.ty, "Sender") {
                 let is_array = type_contains(&f.ty, "Vec");
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
@@ -369,6 +383,25 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
                 input_array: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_ARRAY,
                 output_array: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_ARRAY,
                 ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
+            }
+        }
+    }
+}
+
+/// 函数式宏 `resource_register!("Name", Type)` 的展开（Ch4.3）：编译期提交一条**资源**注册。
+///
+/// 与 [`expand_node_register`] 对偶，但生成的是 `ResourceRegistration`——资源没有端口，故没有
+/// 端口名表 / 数组标记；`ctor` 指向 `flow_rs::resource::build_arc::<Type>`（它把 `T::build` 的
+/// 结果 unsize 成类型擦除的 `AnyResource`）。同样全用**绝对路径** `flow_rs::`（下游、以及经
+/// `extern crate self as flow_rs` 的本 crate 内部，都解析得通）。
+pub fn expand_resource_register(args: &NodeRegisterArgs) -> TokenStream2 {
+    let name = &args.name;
+    let ty = &args.ty;
+    quote! {
+        flow_rs::inventory::submit! {
+            flow_rs::registry::ResourceRegistration {
+                ty: #name,
+                ctor: flow_rs::resource::build_arc::<#ty>,
             }
         }
     }
@@ -469,7 +502,9 @@ mod tests {
         let out = expand_derive_actor(&input).to_string().replace(' ', "");
         assert!(out.contains("implActorforD"));
         assert!(out.contains("tokio::spawn"));
-        assert!(out.contains("self.initialize().await"));
+        // Ch4.3：start 多收 ctx: Context，只在 initialize(&ctx) 一处传入。
+        assert!(out.contains("ctx:flow_rs::context::Context"));
+        assert!(out.contains("self.initialize(&ctx).await"));
         assert!(out.contains("!self.is_all_input_closed()"));
         assert!(out.contains("self.exec().await?"));
         assert!(out.contains("self.close()"));
@@ -594,5 +629,30 @@ mod tests {
         assert!(out.contains("BuildFromPorts>::INPUT_ARRAY"));
         assert!(out.contains("BuildFromPorts>::OUTPUT_ARRAY"));
         assert!(out.contains("BuildFromPorts>::build"));
+    }
+
+    #[test]
+    fn build_from_ports_state_field_defaults() {
+        // Ch4.3：`#[state]` 字段（资源句柄）不走 args 反序列化、也不是端口，而是
+        // `Default::default()` 初始化，留给 `initialize(&ctx)` 运行时填入。
+        let input: DeriveInput = parse_str(
+            "struct D { #[state] counter: Option<std::sync::Arc<Counter>>, input_closed: bool }",
+        )
+        .unwrap();
+        let out = expand_build_from_ports(&input).to_string().replace(' ', "");
+        assert!(out.contains("counter:Default::default()"));
+        // 关键：不把它当自有参数去 args 里找（否则运行时必因缺键报错）。
+        assert!(!out.contains("arg(args,\"counter\")"));
+    }
+
+    #[test]
+    fn resource_register_emits_submit() {
+        // Ch4.3：与 node_register! 对偶，提交 ResourceRegistration，ctor = build_arc::<T>。
+        let args: NodeRegisterArgs = parse_str("\"Counter\", Counter").unwrap();
+        let out = expand_resource_register(&args).to_string().replace(' ', "");
+        assert!(out.contains("flow_rs::inventory::submit!"));
+        assert!(out.contains("flow_rs::registry::ResourceRegistration"));
+        assert!(out.contains("ty:\"Counter\""));
+        assert!(out.contains("flow_rs::resource::build_arc::<Counter>"));
     }
 }

@@ -80,6 +80,10 @@ pub struct GraphConfig {
     /// 节点与节点——有了它，`a` 的输出才能直接喂给 `b` 的输入，不必绕一圈对外端口。
     #[serde(default)]
     pub connections: Vec<ConnConfig>,
+    /// 图的**共享资源**声明（Ch4.3）：构造一次、被图内多个节点按 `name` 共享的重对象
+    /// （检测模型 / 内存池）。装配期一次建好、随 `Context` 分发给每个节点。
+    #[serde(default)]
+    pub resources: Vec<ResourceConfig>,
 }
 
 /// 一个节点实例：图内名 `name` + 注册类型名 `ty` + 其余键作为构造参数 `args`。
@@ -96,6 +100,25 @@ pub struct NodeConfig {
     /// 节点的注册类型名：对应 `node_register!("BinaryOp", ..)` 里那个字符串。
     pub ty: String,
     /// `name`/`ty` 之外的所有键，打包成参数表交给节点构造器。
+    #[serde(default, flatten)]
+    pub args: Args,
+}
+
+/// 一个**资源**声明：资源名 `name` + 注册类型名 `ty` + 其余键作为构造参数 `args`（Ch4.3）。
+///
+/// 与 [`NodeConfig`] 同构——`name`/`ty` 之外的键由 `#[serde(flatten)]` 兜进 `args`，原样交给
+/// 资源构造器（`resource::BuildResource::build`）。同样因 `flatten` ⊥ `deny_unknown_fields`
+/// **不加 deny**。资源与节点的区别只在语义：资源**构造一次、被多个节点按 `name` 共享**，
+/// 而非每节点各造一份（共享模型 / 内存池）。
+///
+/// A resource declaration: name + registered type + flattened construction args.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourceConfig {
+    /// 资源在本图内的名字（节点按它借用；图内唯一）。
+    pub name: String,
+    /// 资源的注册类型名：对应 `resource_register!("Counter", ..)` 里那个字符串。
+    pub ty: String,
+    /// `name`/`ty` 之外的所有键，打包成参数表交给资源构造器。
     #[serde(default, flatten)]
     pub args: Args,
 }
@@ -276,6 +299,37 @@ name="second"
         for bad in ["adda", "add:", ":a", ""] {
             assert!(matches!(PortRef::parse(bad), Err(Error::BadPortRef(_))));
         }
+    }
+
+    #[test]
+    fn parses_graph_resources() {
+        // Ch4.3：resources 声明 = name/ty + flatten 进 args 的额外键（capacity）。
+        // 加了 resources 字段后，deny_unknown_fields 的 GraphConfig 才认得这个键。
+        let toml = r#"
+main = "g"
+[[graphs]]
+name = "g"
+resources = [{name="pool", ty="MemPool", capacity=1024}]
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let g = &cfg.graphs[0];
+        assert_eq!(g.resources.len(), 1);
+        assert_eq!(g.resources[0].name, "pool");
+        assert_eq!(g.resources[0].ty, "MemPool");
+        assert_eq!(
+            g.resources[0]
+                .args
+                .get("capacity")
+                .and_then(|v| v.as_integer()),
+            Some(1024)
+        );
+    }
+
+    #[test]
+    fn graph_without_resources_still_parses() {
+        // resources 是 #[serde(default)]：老图（无 resources 键）照样解析成空表。
+        let cfg = Config::from_toml(BINARY_OP).unwrap();
+        assert!(cfg.graphs[0].resources.is_empty());
     }
 
     #[test]

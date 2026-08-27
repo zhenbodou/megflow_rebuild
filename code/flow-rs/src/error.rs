@@ -84,6 +84,10 @@ pub enum Error {
     /// 崩了才落到这个变体。/ a node task panicked or was cancelled (JoinError).
     #[error("node task join error: {0}")]
     TaskJoin(String),
+    /// TOML 的 `resources` 里写了个注册表里查不到的资源类型名（Ch4.3 build）。
+    /// resource type name not found in the resource registry.
+    #[error("unknown resource type {0:?}")]
+    UnknownResourceType(String),
 }
 
 /// 引擎统一的 `Result` 别名。/ the engine's `Result` alias.
