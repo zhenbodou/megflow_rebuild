@@ -51,6 +51,21 @@ pub enum Error {
         /// 未接线的端口名。
         port: String,
     },
+    /// 一条内部连接的形态不合法（Ch4.1 build）：mpsc 单消费者要求一条连接恰有 1 个接收端
+    /// （输入端口）、≥1 个发送端（输出端口）；扇出到多个消费者需要 bcast 节点。
+    /// a `connections` edge had an invalid shape (needs exactly one consumer + ≥1 producer).
+    #[error("bad connection: {0}")]
+    BadConnection(String),
+    /// 同一个端口被接了不止一次（Ch4.1 build）：一个输入端口只能有一个来源 channel、
+    /// 一个输出端口只能发往一个 channel（一对多的扇出需要 bcast）。
+    /// a port was wired more than once (an input has one source, an output one sink).
+    #[error("node {node:?} port {port:?} is already connected")]
+    PortAlreadyConnected {
+        /// 节点实例名。
+        node: String,
+        /// 被重复接线的端口名。
+        port: String,
+    },
     /// 节点自有参数缺失或类型不符（Ch3.2 `BuildFromPorts::build` 反序列化 `args`）。
     /// node arg missing or of the wrong type.
     #[error("bad node arg {key:?}: {msg}")]

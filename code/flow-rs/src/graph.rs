@@ -148,6 +148,70 @@ impl MainGraph {
             }
         }
 
+        // 图**内部**连接（Ch4.1）：一条连接 = 一条 channel，方向由端点的端口角色推断。
+        // 指向某节点**输出**端口的引用是发送端、指向**输入**端口的是接收端（判据就是
+        // Ch3.2 注册表里的 `inputs`/`outputs` 端口名表）。mpsc 单消费者要求一条连接恰有
+        // 1 个接收端、≥1 个发送端（扇入靠 clone Sender）；扇出到多个消费者需要 bcast 节点。
+        for conn in &g.connections {
+            // 先把这条连接上的每个端口引用按「角色」分成发送端 / 接收端两拨。
+            let mut senders: Vec<PortRef> = Vec::new();
+            let mut receivers: Vec<PortRef> = Vec::new();
+            for pref_str in &conn.ports {
+                let pref = PortRef::parse(pref_str)?;
+                let nd = g
+                    .nodes
+                    .iter()
+                    .find(|n| n.name == pref.node)
+                    .ok_or_else(|| Error::UnknownNode(pref.node.to_owned()))?;
+                let reg =
+                    registry::find(&nd.ty).ok_or_else(|| Error::UnknownNodeType(nd.ty.clone()))?;
+                // 端口名表是 `&'static [&'static str]`，直接用 `contains` 比对端口名即可。
+                if reg.outputs.contains(&pref.port) {
+                    senders.push(pref);
+                } else if reg.inputs.contains(&pref.port) {
+                    receivers.push(pref);
+                } else {
+                    return Err(Error::UnknownPort {
+                        node: pref.node.to_owned(),
+                        port: pref.port.to_owned(),
+                    });
+                }
+            }
+            // mpsc 单消费者：恰 1 个接收端 + ≥1 个发送端，否则这条连接形态非法。
+            if receivers.len() != 1 || senders.is_empty() {
+                return Err(Error::BadConnection(format!(
+                    "connection {:?} has {} receiver(s) and {} sender(s); \
+                     need exactly 1 receiver (input port) and ≥1 sender (output port)",
+                    conn.ports,
+                    receivers.len(),
+                    senders.len()
+                )));
+            }
+
+            let (tx, rx) = channel(conn.cap);
+            // 接收端：把这条 channel 的 rx 挂到该输入端口；端口已被接过 → PortAlreadyConnected。
+            let rcv = receivers[0];
+            let in_slot = node_ins.entry(rcv.node.to_owned()).or_default();
+            if in_slot.contains_key(rcv.port) {
+                return Err(Error::PortAlreadyConnected {
+                    node: rcv.node.to_owned(),
+                    port: rcv.port.to_owned(),
+                });
+            }
+            in_slot.insert(rcv.port.to_owned(), rx);
+            // 发送端：每个输出端口挂一份 tx.clone()（多个发送端即扇入）；同样查重。
+            for snd in &senders {
+                let out_slot = node_outs.entry(snd.node.to_owned()).or_default();
+                if out_slot.contains_key(snd.port) {
+                    return Err(Error::PortAlreadyConnected {
+                        node: snd.node.to_owned(),
+                        port: snd.port.to_owned(),
+                    });
+                }
+                out_slot.insert(snd.port.to_owned(), tx.clone());
+            }
+        }
+
         // 逐节点：find 构造器 → 按注册表端口名表把命名 channel 排成位置 Vec → 造节点。
         let mut actors: Vec<Box<dyn Actor>> = Vec::with_capacity(g.nodes.len());
         for nd in &g.nodes {

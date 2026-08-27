@@ -10,8 +10,8 @@
 //! - **`toml`**：把 TOML 文本喂给 serde，`toml::from_str::<Config>(..)` 一步到位。
 //!
 //! 结构对齐 Ch0.3 契约表里的 TOML schema，是原版 `config/presentation.rs` 的
-//! **教学子集**（本章只覆盖 BinaryOp 用到的字段；`connections`/`resources`/子图等
-//! 留到 Part 4）。
+//! **教学子集**（Part 3 只覆盖 BinaryOp 用到的字段；Ch4.1 补上图**内部连接**
+//! `connections`；`resources`/子图等更后面再上）。
 //!
 //! Graph-config layer: deserialize the pinned TOML schema into typed structs.
 //! Pure `text → structs`; cross-reference validation lives in `build()` (Ch3.2).
@@ -61,7 +61,7 @@ pub struct Config {
     pub graphs: Vec<GraphConfig>,
 }
 
-/// 一张图：名字 + 节点表 + 对外输入/输出端口。
+/// 一张图：名字 + 节点表 + 对外输入/输出端口 + 内部连接。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
@@ -76,6 +76,10 @@ pub struct GraphConfig {
     /// 图对外暴露的输出端口。
     #[serde(default)]
     pub outputs: Vec<PortConfig>,
+    /// 图**内部**的节点间连接（Ch4.1）。对外端口连的是图的边界，`connections` 连的是
+    /// 节点与节点——有了它，`a` 的输出才能直接喂给 `b` 的输入，不必绕一圈对外端口。
+    #[serde(default)]
+    pub connections: Vec<ConnConfig>,
 }
 
 /// 一个节点实例：图内名 `name` + 注册类型名 `ty` + 其余键作为构造参数 `args`。
@@ -105,6 +109,26 @@ pub struct PortConfig {
     /// 这条 channel 的容量（缓冲多少条消息）——满了触发背压。
     pub cap: usize,
     /// 端口引用列表，每项形如 `"节点名:端口名"`（如 `"add:a"`）。
+    #[serde(default)]
+    pub ports: Vec<String>,
+}
+
+/// 一条**内部连接**：channel 容量 `cap` + 挂在这条 channel 上的一组「节点:端口」（Ch4.1）。
+///
+/// 与 [`PortConfig`] 的关键区别是**没有名字**——内部连接是匿名的，它不对外暴露，只把
+/// 图里两个（或多个）节点端口接到同一条 channel 上。方向不写死在配置里，而是**由端口
+/// 角色推断**：引用里指向某节点**输出端口**的那一端是发送方、指向**输入端口**的那一端
+/// 是接收方（Ch3.2 的注册表 `inputs`/`outputs` 端口名表就是判据）。mpsc 单消费者要求
+/// 一条连接恰有 1 个接收端、≥1 个发送端（扇入）；扇出到多个消费者需要 bcast 节点。
+///
+/// An anonymous internal edge: a channel plus the `"node:port"` refs hung on it.
+/// Direction is inferred per endpoint from its port role (output → sender, input → receiver).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnConfig {
+    /// 这条 channel 的容量（缓冲多少条消息）——满了触发背压。
+    pub cap: usize,
+    /// 挂在这条 channel 上的端口引用，每项形如 `"节点名:端口名"`（如 `"add1:c"`）。
     #[serde(default)]
     pub ports: Vec<String>,
 }
