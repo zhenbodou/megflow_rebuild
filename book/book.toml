@@ -12,6 +12,9 @@ renderer = ["html"]
 command = "mdbook-mermaid"
 
 [output.html]
+# 项目页部署在子路径 https://zhenbodou.github.io/megflow_rebuild/ 下，
+# 设置 site-url 让 404 页面与绝对链接能正确解析。
+site-url = "/megflow_rebuild/"
 default-theme = "light"
 preferred-dark-theme = "navy"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]

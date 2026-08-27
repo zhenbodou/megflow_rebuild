@@ -1,0 +1,68 @@
+name: Deploy mdBook to GitHub Pages
+
+on:
+  # 每次推送到 main 自动部署
+  push:
+    branches: [main]
+  # 允许在 Actions 页面手动触发
+  workflow_dispatch:
+
+# GITHUB_TOKEN 权限：读代码 + 写 Pages + OIDC 部署
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个部署；不取消进行中的（让它跑完）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # 与本地一致，锁定版本，避免上游更新导致构建漂移
+      MDBOOK_VERSION: "0.5.4"
+      MDBOOK_TOC_VERSION: "0.15.4"
+      MDBOOK_MERMAID_VERSION: "0.17.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install mdBook + preprocessors
+        run: |
+          cargo binstall -y \
+            mdbook@${MDBOOK_VERSION} \
+            mdbook-toc@${MDBOOK_TOC_VERSION} \
+            mdbook-mermaid@${MDBOOK_MERMAID_VERSION}
+
+      - name: Build book
+        run: mdbook build book
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          # 首次运行时尝试自动把 Pages 源设为 GitHub Actions
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # mdbook 的构建产物目录（book.toml 在 book/ 下，输出到 book/book/）
+          path: book/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
