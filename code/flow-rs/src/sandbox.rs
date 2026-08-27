@@ -70,20 +70,23 @@ impl Sandbox {
         let reg = registry::find(ty).ok_or_else(|| Error::UnknownNodeType(ty.to_owned()))?;
 
         // 输入端口：channel 的 Receiver 给节点，Sender 留给沙箱（供 add_data 喂数）。
+        // Ch4.2：构造器要「分组」端口（`Vec<Vec<_>>`）；沙箱为每个声明端口只开一条 channel，
+        // 故每个端口都是**恰好 1 个的组**（`vec![rx]`）——数组端口在这里退化成 1 路，真正的
+        // N 路扇出/扇入靠 graph 端到端测试覆盖。
         let mut inputs = HashMap::new();
-        let mut ins = Vec::with_capacity(reg.inputs.len());
+        let mut ins: Vec<Vec<Receiver>> = Vec::with_capacity(reg.inputs.len());
         for &port in reg.inputs {
             let (tx, rx) = channel(SANDBOX_CAP);
             inputs.insert(port.to_owned(), tx);
-            ins.push(rx);
+            ins.push(vec![rx]);
         }
         // 输出端口：channel 的 Sender 给节点，Receiver 留给沙箱（供 add_check 收数）。
         let mut outputs = HashMap::new();
-        let mut outs = Vec::with_capacity(reg.outputs.len());
+        let mut outs: Vec<Vec<Sender>> = Vec::with_capacity(reg.outputs.len());
         for &port in reg.outputs {
             let (tx, rx) = channel(SANDBOX_CAP);
             outputs.insert(port.to_owned(), rx);
-            outs.push(tx);
+            outs.push(vec![tx]);
         }
 
         // 端口按注册表的名表顺序排成位置 Vec，交给构造器（与 Graph Builder 同一套接线逻辑）。
@@ -103,7 +106,7 @@ impl Sandbox {
     /// 「喂数任务放手了、沙箱却还攥着一份 Sender、channel 迟迟不关」的挂起。端口不存在 → panic
     /// （测试里写错端口名应尽早炸出来）。
     /// Register data for an input port; the sender is moved out and dropped after feeding.
-    pub fn add_data<T: Send + 'static>(&mut self, port: &str, items: Vec<T>) -> &mut Self {
+    pub fn add_data<T: Send + 'static + Clone>(&mut self, port: &str, items: Vec<T>) -> &mut Self {
         let tx = self
             .inputs
             .remove(port)

@@ -148,18 +148,33 @@ impl<M: Clone> Clone for Envelope<M> {
 pub trait AnyEnvelope: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// 在**类型擦除**下克隆自己：擦掉 `M` 后，标准库的 `Clone` 已无从谈起（trait 对象
+    /// 不是 `Sized`、也不知道具体类型怎么复制）。于是把克隆能力**烙进 trait**——每个具体
+    /// 实现者自己知道怎么克隆一份、再重新封箱。这正是 `dyn-clone` crate 在背后生成的东西，
+    /// 我们手写它（Ch1.3 类型擦除的回访，Ch4.2 广播 `Bcast` 的前提）。
+    /// Clone under type erasure: each concrete impl clones itself and re-seals.
+    fn clone_box(&self) -> SealedEnvelope;
     fn is_some(&self) -> bool;
     fn is_none(&self) -> bool;
     fn info(&self) -> &EnvelopeInfo;
     fn info_mut(&mut self) -> &mut EnvelopeInfo;
 }
 
-impl<M: 'static> AnyEnvelope for Envelope<M> {
+// 要能在类型擦除下克隆，封箱前的载荷 `M` 必须可 `Clone`（否则擦除后无从复制）；`Send`
+// 是跨任务通行证（`SealedEnvelope` 恒为 `+ Send`）。于是 `AnyEnvelope` 的实现前提从
+// 「`M: 'static`」收紧到「`M: 'static + Send + Clone`」——这与原版靠 `dyn-clone` 隐式要求
+// 载荷可克隆是同一层约束，只是我们把它写在明面上。
+// Payloads must be `Clone` (to clone after erasure) and `Send`; mirrors the
+// original's implicit `dyn-clone` requirement, made explicit here.
+impl<M: 'static + Send + Clone> AnyEnvelope for Envelope<M> {
     fn as_any(&self) -> &dyn Any {
         self
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+    fn clone_box(&self) -> SealedEnvelope {
+        Box::new(self.clone())
     }
     fn is_some(&self) -> bool {
         self.msg.is_some()
@@ -180,7 +195,18 @@ impl<M: 'static> AnyEnvelope for Envelope<M> {
 /// cross-task passport (Ch1.1 §3).
 pub type SealedEnvelope = Box<dyn AnyEnvelope + Send>;
 
-impl<M: 'static + Send> Envelope<M> {
+// 让**封箱后的**信封也能克隆：标准库对 `Box<T>` 只在 `T: Clone` 时给 `Clone`，而 trait
+// 对象 `dyn AnyEnvelope + Send` 不是 `Clone`（也不 `Sized`），故那条 blanket 不适用、
+// 与本实现不冲突。这里手写一条：克隆一个 `SealedEnvelope` = 转调其 `clone_box`。这正是
+// `dyn-clone` 的 `clone_trait_object!` 宏生成的实现——我们把它摊开来看清楚。
+// `Box<dyn Trait>` isn't `Clone` for free; delegate to `clone_box` (the dyn-clone pattern).
+impl Clone for SealedEnvelope {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl<M: 'static + Send + Clone> Envelope<M> {
     /// 封箱：擦除类型，变成可跨节点/跨线程搬运的 `SealedEnvelope`。
     /// Seal: erase the payload type into a movable `SealedEnvelope`.
     pub fn seal(self) -> SealedEnvelope {
@@ -227,6 +253,9 @@ impl AnyEnvelope for DummyEnvelope {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+    fn clone_box(&self) -> SealedEnvelope {
+        Box::new(self.clone())
     }
     fn is_some(&self) -> bool {
         false
@@ -294,6 +323,28 @@ mod tests {
         assert!(sealed.is_none());
         assert!(sealed.is::<DummyEnvelope>());
         assert!(sealed.downcast_ref::<Envelope<i32>>().is_none());
+    }
+
+    #[test]
+    fn sealed_envelope_is_cloneable() {
+        // Ch4.2 广播 Bcast 的前提：**类型擦除后仍能克隆**。封箱擦掉了 `M`，克隆能力
+        // 必须在封箱那一刻就烙进 trait（`clone_box`）。克隆出的副本与原件各自独立，
+        // 都能安全 downcast 回具体类型。
+        let sealed: SealedEnvelope = Envelope::new(5i32).seal();
+        let mut a = sealed.clone(); // 走 `impl Clone for Box<dyn AnyEnvelope + Send>`
+        let mut b = sealed; // 原件
+        assert_eq!(a.downcast_mut::<Envelope<i32>>().unwrap().unpack(), 5);
+        assert_eq!(b.downcast_mut::<Envelope<i32>>().unwrap().unpack(), 5);
+    }
+
+    #[test]
+    fn cloned_sealed_envelope_carries_info() {
+        // 克隆连同元信息一起复制（广播出去的每一份都带着相同的 partial_id）。
+        let mut e = Envelope::new(1i32);
+        e.info_mut().partial_id = Some(7);
+        let sealed: SealedEnvelope = e.seal();
+        let clone = sealed.clone();
+        assert_eq!(clone.info().partial_id, Some(7));
     }
 
     #[test]

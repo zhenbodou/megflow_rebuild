@@ -32,7 +32,7 @@
 # 第 4 部分 · 内置节点与高级特性
 
 - [Ch4.1 节点成链：内部连接 connections + 类型无关直通节点 Transform / Noop](part4/ch01-connections-transform.md)
-- [Ch4.2 数组端口与广播/汇聚：Bcast / Merge（扇出与扇入）]()
+- [Ch4.2 数组端口与广播/汇聚：Bcast / Merge（扇出与扇入）](part4/ch02-array-ports-bcast-merge.md)
 - [Ch4.3 Resource 与 Context：共享模型 / 内存池]()
 - [Ch4.4 子图 subgraph、多图 graphs、动态子图]()
 

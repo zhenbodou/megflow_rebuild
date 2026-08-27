@@ -122,3 +122,97 @@ impl NoopConsumer {
 }
 
 node_register!("NoopConsumer", NoopConsumer);
+
+/// 广播节点（扇出）：从输入端口 `inp` 收一条消息，**复制**给**数组输出端口** `out` 上挂着的
+/// 每一个下游。`#[outputs(out[])]` 把 `out` 声明成数组端口（字段类型 `Vec<Sender>`）——图里
+/// 可以把它接到任意多条边上，装配期每条边往这个组里塞一个 `Sender`（见 Graph Builder 的
+/// `attach_sender` 与「数组端口允许多接」）。
+///
+/// 这解释了 Ch1.4 为何把 channel 钉成 **mpsc（单消费者）**、又为何 Ch4.2 要给 `SealedEnvelope`
+/// 补上「类型擦除的 `Clone`」：一条 channel 喂不了多个消费者，广播只能靠**在节点里复制消息、
+/// 分别发往多条独立 channel** 来实现——`Bcast` 正是这件事的落点。原版把广播糅进 channel 层
+/// （`bcast`），重写版把它上提成一个**普通节点**：channel 保持极简，扇出是节点的职责。
+///
+/// 发送策略用 `split_last`：对「除最后一个之外」的下游发 `msg.clone()`（类型擦除克隆），
+/// 最后一个直接把 `msg` **搬**过去——省掉一次多余的克隆。`.ok()` **吞掉发送错误**：某个下游
+/// 关了不该拖垮整场广播，其余下游照发；等自己的输入 `inp` 关闭时才随 `?` 收工。
+///
+/// A broadcast (fan-out) node: clones one input message to every sender in its array
+/// output port. Clone-to-all-but-last, move-into-last; send errors are swallowed.
+#[inputs(inp)]
+#[outputs(out[])]
+#[derive(Node, Actor, BuildFromPorts)]
+pub struct Bcast {}
+
+#[methods]
+impl Bcast {
+    async fn exec(&mut self) -> Result<()> {
+        // 收一条封箱消息。输入关闭 → `recv_any` 返回 `ChannelClosed`，`?` 交给包装收工。
+        let msg = self.inp.recv_any().await?;
+        // 数组输出端口 `out: Vec<Sender>`。split_last：前 n-1 个发克隆、最后一个搬原件。
+        if let Some((last, rest)) = self.out.split_last() {
+            for out in rest {
+                // 类型擦除克隆（Ch4.2 给 SealedEnvelope 补的 Clone）。某路关了就跳过（.ok()）。
+                out.send_any(msg.clone()).await.ok();
+            }
+            last.send_any(msg).await.ok();
+        }
+        // out 为空组（图里没接任何下游）→ 消息直接 drop，退化成一个 drain。
+        Ok(())
+    }
+}
+
+node_register!("Bcast", Bcast);
+
+/// 汇聚节点（扇入）：从**数组输入端口** `inps` 上挂着的多个上游里，**谁先来收谁**，把消息转发到
+/// 输出端口 `out`。`#[inputs(inps[])]` 把 `inps` 声明成数组端口（字段类型 `Vec<Receiver>`）——
+/// 图里可以把多条边接到它，装配期每条边往组里塞一个 `Receiver`（见 `attach_receiver`）。
+///
+/// 与 `Bcast` 对偶，但**扇入本可以不要节点**——mpsc 本就多生产者，多个上游 clone 同一个
+/// `Sender` 发往一条 channel 即可（Ch4.1 的经典扇入就是这么做的，无需 `Merge`）。`Merge` 的
+/// 存在价值是另一种扇入语义：上游各自持有**独立** channel（互不背压、可分别关闭），由本节点
+/// **公平地轮询**它们——这正是 `Vec<Receiver>` 而非「一条共享 channel」的意义。
+///
+/// 实现用 `futures_util::future::select_ok`：它并发 race 一组 future，返回**第一个成功**的结果，
+/// 且**跳过**先返回 `Err` 的（某路已关闭 → `ChannelClosed` 是 `Err`，会被跳过，继续等其余路），
+/// 直到某路拿到消息（`Ok`）、或**所有路都 `Err`**（全部上游关闭）才整体返回 `Err`。这与
+/// `select_all`（返回第一个**完成**的、不分成败）截然不同——用 `select_all` 会把「某路关闭」
+/// 误当成有消息。全部关闭时 `select_ok` 返回的 `Err(ChannelClosed)` 经 `?` 交给 `#[methods]`
+/// 包装 → 置关闭标志 → 收工。
+///
+/// `select_ok` 拿到结果后返回 `(msg, 其余未完成的 future)`；我们用 `let (msg, _) = ..` 立即
+/// **丢弃**那些未完成的 future。`tokio` 的 `recv` 是**可取消的**（cancel-safe）：丢弃一个尚未
+/// 就绪的 `recv` future 不会吞掉任何消息，下一轮 `exec` 会为每路重新发起 `recv`。
+///
+/// A merge (fan-in) node: races independent input receivers via `select_ok`, forwarding
+/// the first ready message; skips closed receivers until one is ready or all are closed.
+#[inputs(inps[])]
+#[outputs(out)]
+#[derive(Node, Actor, BuildFromPorts)]
+pub struct Merge {}
+
+#[methods]
+impl Merge {
+    async fn exec(&mut self) -> Result<()> {
+        // 没接任何上游（空组）→ 无可轮询，直接以 ChannelClosed 收工（交给包装置标志）。
+        if self.inps.is_empty() {
+            return Err(Error::ChannelClosed);
+        }
+        // 为每路发起一个 recv_any future，pin 后交给 select_ok 并发 race。
+        let futs: Vec<_> = self
+            .inps
+            .iter_mut()
+            .map(|r| Box::pin(r.recv_any()))
+            .collect();
+        // 谁先拿到消息用谁；先 Err（某路关闭）的被跳过；全 Err → 整体 Err(ChannelClosed)。
+        // `_` 立即丢弃其余未完成的 future（recv 可取消，不丢消息）。
+        let (msg, _) = futures_util::future::select_ok(futs).await?;
+        // `out` 是 Option<Sender>——close() 会把它置 None。仍在时才转发。
+        if let Some(out) = self.out.as_ref() {
+            out.send_any(msg).await?;
+        }
+        Ok(())
+    }
+}
+
+node_register!("Merge", Merge);

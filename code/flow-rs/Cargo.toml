@@ -15,6 +15,8 @@ inventory = { workspace = true }
 # 配置解析层（Ch3.1）：serde 派生 Deserialize，toml 把图拓扑文本解析成配置结构。
 serde = { workspace = true }
 toml = { workspace = true }
+# 异步组合子（Ch4.2）：Merge 扇入节点用 `future::select_ok` 并发 race 多个 Receiver。
+futures-util = { workspace = true }
 
 [lib]
 doctest = false

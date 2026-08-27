@@ -21,9 +21,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, DeriveInput, Ident, ItemImpl, ItemStruct, Token};
+use syn::{parse_macro_input, DeriveInput, ItemImpl, ItemStruct, Token};
 
 mod node;
+use node::PortSpec;
 
 /// 派生宏 `#[derive(TypeName)]`：给结构体/枚举生成一个返回其类型名的**固有方法**
 /// `const fn type_name() -> &'static str`。
@@ -45,19 +46,21 @@ pub fn derive_type_name(input: TokenStream) -> TokenStream {
 // ── Ch2.3：节点宏入口（薄）。逻辑一律在 `node` 模块，便于单元测试。──
 
 /// 属性宏 `#[inputs(a, b, ..)]`：给节点结构体注入输入端口字段 + 关闭标志。
+/// 端口名后跟 `[]` 表示**数组端口**（如 `#[inputs(inps[])]` → `Vec<Receiver>`，扇入）。
 #[proc_macro_attribute]
 pub fn inputs(args: TokenStream, item: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(args with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let specs = parse_macro_input!(args with Punctuated::<PortSpec, Token![,]>::parse_terminated);
     let item = parse_macro_input!(item as ItemStruct);
-    node::expand_inputs(&names.into_iter().collect::<Vec<_>>(), item).into()
+    node::expand_inputs(&specs.into_iter().collect::<Vec<_>>(), item).into()
 }
 
 /// 属性宏 `#[outputs(a, b, ..)]`：给节点结构体注入输出端口字段。
+/// 端口名后跟 `[]` 表示**数组端口**（如 `#[outputs(out[])]` → `Vec<Sender>`，扇出/广播）。
 #[proc_macro_attribute]
 pub fn outputs(args: TokenStream, item: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(args with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let specs = parse_macro_input!(args with Punctuated::<PortSpec, Token![,]>::parse_terminated);
     let item = parse_macro_input!(item as ItemStruct);
-    node::expand_outputs(&names.into_iter().collect::<Vec<_>>(), item).into()
+    node::expand_outputs(&specs.into_iter().collect::<Vec<_>>(), item).into()
 }
 
 /// 属性宏 `#[methods]`：改写节点的固有 impl 块（包装 exec + 补齐生命周期）。

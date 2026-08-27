@@ -29,12 +29,74 @@
 //! lands here.
 
 use crate::channel::{channel, Receiver, Sender};
-use crate::config::{Config, PortRef};
+use crate::config::{Config, GraphConfig, PortRef};
 use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
+
+/// 查一个节点实例的注册条目：节点名不存在 → `UnknownNode`，类型没注册 → `UnknownNodeType`。
+/// 接线时要用注册条目里的端口名表 + 数组标记表判断「某端口是不是数组端口」。
+/// Look up a node instance's registration (for its port tables + array-ness).
+fn node_reg(g: &GraphConfig, node: &str) -> Result<&'static registry::NodeRegistration> {
+    let nd = g
+        .nodes
+        .iter()
+        .find(|n| n.name == node)
+        .ok_or_else(|| Error::UnknownNode(node.to_owned()))?;
+    registry::find(&nd.ty).ok_or_else(|| Error::UnknownNodeType(nd.ty.clone()))
+}
+
+/// 把一个 `Receiver` 挂到某节点输入端口的**端口组**上（Ch4.2：一个端口名 → 一组 channel 端）。
+/// **标量**输入端口只能接 1 条边，已有边再接 → `PortAlreadyConnected`；**数组**输入端口
+/// （`Vec<Receiver>`）可接多条（扇入 Merge）。未声明的端口按标量处理，留到构造期的
+/// 「多余端口」检查报 `UnknownPort`。
+fn attach_receiver(
+    node_ins: &mut HashMap<String, HashMap<String, Vec<Receiver>>>,
+    reg: &registry::NodeRegistration,
+    node: &str,
+    port: &str,
+    rx: Receiver,
+) -> Result<()> {
+    let slot = node_ins
+        .entry(node.to_owned())
+        .or_default()
+        .entry(port.to_owned())
+        .or_default();
+    if !reg.input_is_array(port) && !slot.is_empty() {
+        return Err(Error::PortAlreadyConnected {
+            node: node.to_owned(),
+            port: port.to_owned(),
+        });
+    }
+    slot.push(rx);
+    Ok(())
+}
+
+/// 把一个 `Sender` 挂到某节点输出端口的**端口组**上。**标量**输出端口只能接 1 条边，
+/// 已有边再接 → `PortAlreadyConnected`；**数组**输出端口（`Vec<Sender>`）可接多条（扇出 Bcast）。
+fn attach_sender(
+    node_outs: &mut HashMap<String, HashMap<String, Vec<Sender>>>,
+    reg: &registry::NodeRegistration,
+    node: &str,
+    port: &str,
+    tx: Sender,
+) -> Result<()> {
+    let slot = node_outs
+        .entry(node.to_owned())
+        .or_default()
+        .entry(port.to_owned())
+        .or_default();
+    if !reg.output_is_array(port) && !slot.is_empty() {
+        return Err(Error::PortAlreadyConnected {
+            node: node.to_owned(),
+            port: port.to_owned(),
+        });
+    }
+    slot.push(tx);
+    Ok(())
+}
 
 /// 建图器：吃一段图拓扑 TOML，产出装配好的 [`MainGraph`]。
 ///
@@ -100,35 +162,31 @@ impl MainGraph {
             .main_graph()
             .ok_or_else(|| Error::MainGraphNotFound(config.main.clone()))?;
 
-        // 每个节点各端口的 channel 端，按名收集；对外句柄单独收。
-        let mut node_ins: HashMap<String, HashMap<String, Receiver>> = HashMap::new();
-        let mut node_outs: HashMap<String, HashMap<String, Sender>> = HashMap::new();
+        // 每个节点各端口的 channel 端，按名收集（Ch4.2：一个端口名 → 一组 channel 端——
+        // 标量端口是恰 1 个的组、数组端口是 N 个的组）；对外句柄单独收。
+        let mut node_ins: HashMap<String, HashMap<String, Vec<Receiver>>> = HashMap::new();
+        let mut node_outs: HashMap<String, HashMap<String, Vec<Sender>>> = HashMap::new();
         let mut inputs: HashMap<String, Sender> = HashMap::new();
         let mut outputs: HashMap<String, Receiver> = HashMap::new();
 
-        let node_exists = |n: &str| g.nodes.iter().any(|nd| nd.name == n);
-
         // 对外**输入**：channel 的 Sender 归用户，Receiver 接到目标节点的输入端口。
-        // 一条 channel 只有一个 Receiver，故一个对外输入只能接一个目标端口；扇出（一份
-        // 输入喂多个端口）需要广播，留到 Ch4.1 的 bcast。
+        // 一条 channel 只有一个 Receiver，故一个对外输入只能喂一个目标端口——要把一份对外
+        // 输入扇出给多个端口，得在图里放一个 `Bcast` 节点（数组输出端口，见本章），而不能
+        // 靠拆 Receiver（mpsc 单消费者，拆不了）。
         for pc in &g.inputs {
             if pc.ports.len() != 1 {
                 return Err(Error::Unsupported(format!(
-                    "graph input {:?} feeds {} node ports; fan-out (broadcast) lands in Ch4.1",
+                    "graph input {:?} feeds {} node ports; a single input channel has one \
+                     consumer — use a Bcast node to fan out",
                     pc.name,
                     pc.ports.len()
                 )));
             }
             let pref = PortRef::parse(&pc.ports[0])?;
-            if !node_exists(pref.node) {
-                return Err(Error::UnknownNode(pref.node.to_owned()));
-            }
+            let reg = node_reg(g, pref.node)?;
             let (tx, rx) = channel(pc.cap);
             inputs.insert(pc.name.clone(), tx);
-            node_ins
-                .entry(pref.node.to_owned())
-                .or_default()
-                .insert(pref.port.to_owned(), rx);
+            attach_receiver(&mut node_ins, reg, pref.node, pref.port, rx)?;
         }
 
         // 对外**输出**：channel 的 Receiver 归用户，Sender 接到源节点的输出端口。
@@ -138,13 +196,8 @@ impl MainGraph {
             outputs.insert(pc.name.clone(), rx);
             for pref_str in &pc.ports {
                 let pref = PortRef::parse(pref_str)?;
-                if !node_exists(pref.node) {
-                    return Err(Error::UnknownNode(pref.node.to_owned()));
-                }
-                node_outs
-                    .entry(pref.node.to_owned())
-                    .or_default()
-                    .insert(pref.port.to_owned(), tx.clone());
+                let reg = node_reg(g, pref.node)?;
+                attach_sender(&mut node_outs, reg, pref.node, pref.port, tx.clone())?;
             }
         }
 
@@ -189,26 +242,17 @@ impl MainGraph {
             }
 
             let (tx, rx) = channel(conn.cap);
-            // 接收端：把这条 channel 的 rx 挂到该输入端口；端口已被接过 → PortAlreadyConnected。
+            // 接收端：把这条 channel 的 rx 挂到该输入端口。标量端口重复接 → PortAlreadyConnected；
+            // 数组输入端口（Merge 扇入）允许多条连接各挂一个 Receiver，攒成一组。
             let rcv = receivers[0];
-            let in_slot = node_ins.entry(rcv.node.to_owned()).or_default();
-            if in_slot.contains_key(rcv.port) {
-                return Err(Error::PortAlreadyConnected {
-                    node: rcv.node.to_owned(),
-                    port: rcv.port.to_owned(),
-                });
-            }
-            in_slot.insert(rcv.port.to_owned(), rx);
-            // 发送端：每个输出端口挂一份 tx.clone()（多个发送端即扇入）；同样查重。
+            let rcv_reg = node_reg(g, rcv.node)?;
+            attach_receiver(&mut node_ins, rcv_reg, rcv.node, rcv.port, rx)?;
+            // 发送端：每个输出端口挂一份 tx.clone()（同一条连接多个发送端即经典扇入）。
+            // 标量端口跨连接重复接 → PortAlreadyConnected；数组输出端口（Bcast 扇出）允许
+            // 多条连接各挂一个 Sender，攒成一组。
             for snd in &senders {
-                let out_slot = node_outs.entry(snd.node.to_owned()).or_default();
-                if out_slot.contains_key(snd.port) {
-                    return Err(Error::PortAlreadyConnected {
-                        node: snd.node.to_owned(),
-                        port: snd.port.to_owned(),
-                    });
-                }
-                out_slot.insert(snd.port.to_owned(), tx.clone());
+                let snd_reg = node_reg(g, snd.node)?;
+                attach_sender(&mut node_outs, snd_reg, snd.node, snd.port, tx.clone())?;
             }
         }
 
@@ -221,26 +265,30 @@ impl MainGraph {
             let mut ins_map = node_ins.remove(&nd.name).unwrap_or_default();
             let mut outs_map = node_outs.remove(&nd.name).unwrap_or_default();
 
-            // 按声明顺序取端口——顺序即注册表里的 INPUTS/OUTPUTS，与构造器填字段同序。
-            let mut ins = Vec::with_capacity(reg.inputs.len());
+            // 按声明顺序把命名端口组排成位置分组 Vec——顺序即注册表 INPUTS/OUTPUTS，
+            // 与构造器填字段同序。每个端口 → 一组 channel 端：标量端口必须恰好接了 1 条
+            // （空组 → PortNotConnected），数组端口 0..N 条皆可（空组 = 没接，合法）。
+            let mut ins: Vec<Vec<Receiver>> = Vec::with_capacity(reg.inputs.len());
             for &port in reg.inputs {
-                let rx = ins_map
-                    .remove(port)
-                    .ok_or_else(|| Error::PortNotConnected {
+                let group = ins_map.remove(port).unwrap_or_default();
+                if group.is_empty() && !reg.input_is_array(port) {
+                    return Err(Error::PortNotConnected {
                         node: nd.name.clone(),
                         port: port.to_owned(),
-                    })?;
-                ins.push(rx);
+                    });
+                }
+                ins.push(group);
             }
-            let mut outs = Vec::with_capacity(reg.outputs.len());
+            let mut outs: Vec<Vec<Sender>> = Vec::with_capacity(reg.outputs.len());
             for &port in reg.outputs {
-                let tx = outs_map
-                    .remove(port)
-                    .ok_or_else(|| Error::PortNotConnected {
+                let group = outs_map.remove(port).unwrap_or_default();
+                if group.is_empty() && !reg.output_is_array(port) {
+                    return Err(Error::PortNotConnected {
                         node: nd.name.clone(),
                         port: port.to_owned(),
-                    })?;
-                outs.push(tx);
+                    });
+                }
+                outs.push(group);
             }
             // 消费完注册表声明的端口后还有剩 = 配置接了节点类型上不存在的端口。
             if let Some((port, _)) = ins_map.into_iter().next() {

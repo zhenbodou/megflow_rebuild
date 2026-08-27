@@ -50,10 +50,17 @@ fn doubler_is_registered() {
 async fn build_via_registry_and_run() {
     // 只凭类型名拿到构造器，位置接线（1 输入 1 输出）造出节点。
     // Ch3.2 起 ctor 多了 `&Args` 入参并返回 `Result`——Doubler 没有自有参数，传空表即可。
+    // Ch4.2 起端口按「分组」传（`Vec<Vec<_>>`，每组一个端口名）：标量端口是恰 1 个的组，
+    // 故这里把单个 channel 端包成 `vec![vec![..]]`。
     let reg = find("Doubler").expect("Doubler 已注册");
     let (in_tx, in_rx) = channel(8);
     let (out_tx, mut out_rx) = channel(8);
-    let node = (reg.ctor)(&flow_rs::config::Args::new(), vec![in_rx], vec![out_tx]).unwrap();
+    let node = (reg.ctor)(
+        &flow_rs::config::Args::new(),
+        vec![vec![in_rx]],
+        vec![vec![out_tx]],
+    )
+    .unwrap();
 
     let handle = node.start();
     for v in [1i32, 2, 3] {

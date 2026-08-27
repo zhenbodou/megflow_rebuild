@@ -28,6 +28,9 @@ inventory = "0.3"
 # Deserialize）；toml = 把图拓扑的 TOML 文本解析成类型化的配置结构。均 crates.io 公共。
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# 异步组合子（Part 4 Ch4.2）：Merge 扇入节点用 `future::select_ok` 并发 race 多个
+# Receiver、返回第一个成功者。生态最基础的 future 工具库，crates.io 公共。
+futures-util = "0.3"
 
 [profile.dev]
 incremental = true

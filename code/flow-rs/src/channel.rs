@@ -41,10 +41,13 @@ impl Sender {
     }
 
     /// 发送一个类型化信封：内部先 `seal` 再走 `send_any`。
-    /// Send a typed envelope; seals then delegates to `send_any`.
+    /// 载荷 `T` 须可 `Clone`——封箱后的 `SealedEnvelope` 要支持类型擦除克隆（广播用），
+    /// 这条约束由 `Envelope::seal` 一路传导到这里（见 flow-message envelope.rs）。
+    /// Send a typed envelope; seals then delegates to `send_any`. `T: Clone` because
+    /// sealed envelopes must be cloneable under type erasure (for broadcast).
     pub async fn send<T>(&self, msg: Envelope<T>) -> Result<()>
     where
-        T: 'static + Send,
+        T: 'static + Send + Clone,
     {
         self.send_any(msg.seal()).await
     }
