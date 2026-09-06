@@ -1,0 +1,5 @@
+error: 数组端口请写 name[]，方括号内不能指定长度或类型
+ --> tests/ui/array_contents.rs:3:14
+  |
+3 | #[inputs(inp[16])]
+  |              ^^

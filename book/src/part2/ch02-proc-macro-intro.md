@@ -6,7 +6,7 @@
 
 ## 1. 过程宏是什么
 
-Rust 有两类宏。`macro_rules!`（声明宏）是「模式替换」，能力有限。**过程宏**则是**真正的 Rust 程序**：它接收一段代码的 **token 流**作为输入，返回一段 token 流作为输出，中间你可以用任意 Rust 逻辑去分析、变换、生成。它在编译期、在你的代码被真正编译**之前**运行。
+先接上 Ch2.0：`macro_rules!`（声明宏）通过匹配语法生成代码。**过程宏**则是**真正的 Rust 程序**：它接收一段代码的 **token 流**作为输入，返回一段 token 流作为输出，中间你可以用任意 Rust 逻辑去分析、变换、生成。它在编译期、在你的代码被真正编译**之前**运行。
 
 过程宏有三种形态：
 
@@ -22,7 +22,7 @@ MegFlow 三种都用到了：Ch2.2 先做**派生宏**（最容易入门，只�
 
 裸写 token 流会疯掉。生态用三个基础 crate 把它变得可控——这就是几乎每个过程宏都依赖的「三件套」：
 
-- **`proc-macro2`**：token 流的**类型**。编译器自带的 `proc_macro::TokenStream` 有个致命限制——它只能在过程宏入口函数里存在，**无法在普通函数或单元测试里构造**。`proc-macro2` 是它的可移植镜像（`proc_macro2::TokenStream`），syn 和 quote 都围绕它工作。**这个区别后面测试时是关键。**
+- **`proc-macro2`**：token 流的**类型**。编译器自带的 `proc_macro::TokenStream` 有个致命限制——它需要编译器提供的过程宏执行上下文，**不适合在普通程序或单元测试中直接构造**（宏入口调用的普通辅助函数仍可使用它）。`proc-macro2` 是它的可移植镜像（`proc_macro2::TokenStream`），syn 和 quote 都围绕它工作。**这个区别后面测试时是关键。**
 - **`syn`**：**解析器**。把 token 流解析成结构化的**语法树**。比如 `syn::DeriveInput` 就是「一个带属性的 struct/enum 定义」的语法树，有 `.ident`（名字）、`.generics`（泛型）、`.data`（字段/变体）等字段。
 - **`quote`**：**生成器**。`quote! { ... }` 宏让你像写模板一样写目标代码，用 `#var` 把变量**插值**进去，产出 token 流。
 
@@ -105,20 +105,10 @@ pub fn derive_type_name(input: TokenStream) -> TokenStream {
 - `parse_macro_input!` 把编译器给的 token 解析成 `DeriveInput`；解析失败会自动生成友好的编译错误。
 - `.into()` 把逻辑函数产出的 `proc_macro2::TokenStream` 转回编译器要的 `proc_macro::TokenStream`。
 
-**逻辑核心**——收发 `proc_macro2::TokenStream`，所以可被单元测试直接调用：
+**逻辑核心**——接收 `&DeriveInput`，返回 `proc_macro2::TokenStream`，可被单元测试直接调用：
 
 ```rust,ignore
-fn expand_type_name(input: &DeriveInput) -> proc_macro2::TokenStream {
-    let name = &input.ident;             // 语法树里取出类型名，如 `Foo`（一个 Ident）
-    let name_str = name.to_string();     // "Foo"（一个 String，会插成字符串字面量）
-    quote! {
-        impl #name {
-            pub const fn type_name() -> &'static str {
-                #name_str
-            }
-        }
-    }
-}
+{{#include ../../../code/flow-derive/src/lib.rs:type_name_expansion}}
 ```
 
 `quote!` 是这里的主角。它几乎就是「把你想生成的代码原样写出来」，只有 `#name` / `#name_str` 是插值点：
@@ -134,7 +124,7 @@ fn expand_type_name(input: &DeriveInput) -> proc_macro2::TokenStream {
 
 这是本章最该带走的工程经验。上面的 §3 铁律 2 让测试分成互补的两层：
 
-**单元测试**（在 `lib.rs` 里 `#[cfg(test)]`）——测**逻辑函数** `expand_type_name`。因为它收发 `proc_macro2::TokenStream`，我们能用 `syn::parse_str` 凭空造一个语法树喂进去，再把输出 token **转成字符串**比对：
+**单元测试**（在 `lib.rs` 里 `#[cfg(test)]`）——测**逻辑函数** `expand_type_name`。因为它接收普通语法树、返回 `proc_macro2::TokenStream`，我们能用 `syn::parse_str` 凭空造一个语法树喂进去，再把输出 token **转成字符串**比对：
 
 ```rust,ignore
 #[test]
@@ -152,12 +142,12 @@ fn expands_to_impl_with_type_name() {
 
 > 为什么单元测试测不了入口、集成测试却行？因为集成测试是**独立的编译单元**（相当于一个下游 crate），它像真实用户一样在自己的编译过程里展开宏；而 `lib.rs` 内部的单元测试和宏在同一个 proc-macro crate 里，拿不到 `proc_macro::TokenStream` 这个「只在宏上下文存在」的类型。
 
-两种合起来才完整：**单元测试盯生成逻辑，集成测试盯真实行为。** 后面每个宏我们都按这个套路测。
+这两种是基础，还要加入非法输入的编译诊断测试（见 Ch2.3a）：**单元测试盯生成逻辑，集成测试盯真实行为。** 后面每个宏我们都按这个套路测。
 
 ## 7. 对比原版 · 本章后置的边界
 
-- **syn 版本**：原版用 `syn = "1"`，我们用 **`syn = "2"`**（2023 年起的主流大版本，属性解析等 API 更清晰）——契合「学主流 Rust」。两版语法树结构有差异，重写按 syn 2 来。
-- **泛型没处理**：`expand_type_name` 直接 `impl #name`，遇到 `struct Foo<T>` 会生成非法的 `impl Foo`（少了 `<T>`）。正确做法是 `input.generics.split_for_impl()`，但那是 Ch2.3 `#[derive(Node)]` 必须面对的，本入门示例只针对无泛型类型，留到那时讲。
+- **syn 版本**：原版用 `syn = "1"`，我们用 **`syn = "2"`**（与随书锁文件保持一致，详见 Ch2.2a）——契合「学主流 Rust」。两版语法树结构有差异，重写按 syn 2 来。
+- **泛型已纳入当前实现**：`split_for_impl()` 分别提供 impl 参数、类型参数和 where 子句。Ch2.2b 用生命周期、默认类型和 const 泛型解释其区别，主工程集成测试会真实编译这些用法。
 - **syn features**：本章解析 `DeriveInput` 用默认 features 就够；Ch2.3 的 `#[methods]` 要解析 `impl` 块里的**方法体**，届时升到 `features = ["full"]`——按需生长，不提前拉全。
 
 真实代码见 `code/flow-derive/src/lib.rs`（入口 + `expand_type_name` + 单元测试）与 `code/flow-derive/tests/derive_type_name.rs`（集成测试）。

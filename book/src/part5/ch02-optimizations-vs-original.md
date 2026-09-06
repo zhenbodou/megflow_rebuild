@@ -114,27 +114,18 @@ pie showData
 
 > 顺带纠正一个常见误记:原版**没有** `#[flow_rs::ln]` 这样的宏，注册面向下游的宏就叫 `node_register!`（和我们一样）。另外原版 `Cargo.toml` 里虽然列着 `inventory = "0.2.3"`，但**没有任何 `.rs` 文件真的用它**——原版真正的注册机制是上面这套 `ctor` + `lazy_static`。
 
-**我们**（Ch2.4）:同名的 `node_register!` 展开成 **`inventory::submit!`**，把注册项放进一个**链接期**收集的 linker section。程序启动时，`inventory::iter` 直接遍历这个 section——**没有运行期插入、没有锁、没有 `lazy_static` 的首次初始化、没有 pre-main 运行的构造函数**。
+**我们**（Ch2.4）：`node_register!` 生成 `inventory::submit!`。
+当前 inventory 0.3.24 同样生成初始化函数；静态条目及初始化入口被链接进程序，
+平台初始化机制将条目登记到类型化注册表，`iter` 再枚举它们。
+其实现可在依赖源码的 `__do_submit` / `__ctor` 中检查，Ch2.4a 有可运行实验。
 
-**对比这两套机制的运行期行为**:
+因此不能声称“没有 pre-main 构造函数”“没有运行期插入”，也不能由此推导
+性能更快或错误更少。可确认的变化是：重写使用公共库管理注册基础设施，
+构造器改用明确的函数指针类型，不再需要原版构造路径的 transmute。
+这项类型安全改变与初始化性能是两件事，需要分别验证。
 
-```mermaid
-flowchart LR
-    subgraph orig["原版:ctor + lazy_static"]
-        O1["dlopen 加载库"] --> O2["#[ctor] 函数运行<br/>(pre-main / load 时)"]
-        O2 --> O3["抢 RwLock 写锁"]
-        O3 --> O4["插进全局 HashMap"]
-        O4 --> O5["首次访问触发<br/>lazy_static 初始化"]
-    end
-    subgraph ours["我们:inventory"]
-        N1["编译/链接期"] --> N2["注册项写进<br/>binary 的 linker section"]
-        N2 --> N3["启动时直接遍历<br/>——无锁、无插入、无 pre-main"]
-    end
-```
-
-**为什么这对我们是真优化**:`ctor`（在 `main` 之前运行任意代码）是公认的 footgun——初始化顺序不确定、构造函数里 panic 很难排查。`lazy_static` + `RwLock` 引入运行期的锁与首次初始化开销。我们这套把「有哪些节点」变成**编译期就固定在二进制里的数据**，运行期只是读——移动部件更少，出错的地方就更少。
-
-**诚实标注**:原版那套 `ctor` + `lazy_static` + `RwLock` 之所以是**运行期 + 带锁**，是因为它要支持**运行期动态注册**——通过 `dlopen` 在运行时加载的 C/Python 插件，能往同一张全局表里插自己的节点。这是个**真实且合理**的需求。我们不支持运行期加载插件（零 FFI），所以 `inventory` 的编译期收集才够用。又一次:**架构决定设计**。如果哪天要支持运行期插件，我们大概也得回到某种带锁的运行期注册表。
+inventory 的枚举次序未规定，重名登记不能依赖“后者覆盖前者”。
+当前重写还没有实现原版的完整运行期插件加载与注册协议，这仍属于对齐缺口。
 
 ## 6. 运行时 `rt`：一节必须诚实的对比
 

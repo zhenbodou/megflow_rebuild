@@ -5,11 +5,9 @@
 //! 业务节点在下游 crate），却要在**运行前**汇成一张全局表——这正是「编译期分布式
 //! 注册」。
 //!
-//! 原版 MegFlow 为此自建了一套：`#[flow_rs::ln]` 属性宏 + `lazy_static` 全局表 +
-//! 首次访问时的运行时注册。我们**换成成熟公共 crate [`inventory`]**：它用链接期的
-//! section 收集机制，把各处 `inventory::submit!` 的条目在 **link 阶段**就拼进一张表，
-//! 运行时 `inventory::iter` 直接枚举——少一套要自己维护的注册机制，也没有首次访问的
-//! 运行时开销。
+//! 原版用 ctor 初始化函数和 lazy_static 管理运行时表。重写使用 inventory：
+//! 宏生成静态数据及初始化入口，随应用链接后由平台初始化机制登记条目，
+//! 运行时通过 inventory::iter 枚举。它并不是没有运行时初始化，也不保证遍历顺序。
 //!
 //! 三个部件：
 //! - [`NodeRegistration`]：一条注册条目 = `{ 名字, 构造器 }`。用 [`inventory::collect`]
@@ -86,7 +84,7 @@ impl NodeRegistration {
 }
 
 // 声明「本 crate 收集 `NodeRegistration` 条目」。`collect!` 必须与被收集类型同 crate，
-// 且在 item 位置（模块级）。各处 `submit!` 的条目在 link 期汇入这张表。
+// 且在 item 位置（模块级）。各处 submit! 的条目随应用链接后通过初始化机制登记。
 inventory::collect!(NodeRegistration);
 
 /// 「从端口构造节点」的 trait，由 `#[derive(BuildFromPorts)]` 生成实现。
@@ -121,7 +119,7 @@ pub trait BuildFromPorts {
     ) -> Result<Box<dyn Actor>>;
 }
 
-/// 枚举所有已注册节点（link 期汇总的全局表）。
+/// 枚举所有已注册节点（初始化登记的全局表）。
 /// Iterate over every registered node.
 pub fn registrations() -> impl Iterator<Item = &'static NodeRegistration> {
     inventory::iter::<NodeRegistration>.into_iter()
@@ -137,7 +135,7 @@ pub fn find(name: &str) -> Option<&'static NodeRegistration> {
 // 与上面的节点注册表**对偶**，但简单得多：资源没有端口、没有 arity，只有「类型名 → 构造器」。
 // 构造器吃一份配置参数 `args`、产出类型擦除的 [`AnyResource`]（`Arc<dyn Any+Send+Sync>`）。
 // 复用同一套 [`inventory`] 机制：`resource_register!`（flow-derive）在**任意 crate** `submit!`
-// 一条条目，link 期汇成一张全局表，`find_resource` 按名查出。
+// 一条条目，经初始化登记到一张全局表，`find_resource` 按名查出。
 // A dual, simpler registry for resources: name → constructor, same `inventory` backing.
 
 /// 资源构造器：吃配置参数、产出类型擦除的共享资源（失败 → `Err`）。裸函数指针，可 const 构造。
@@ -153,10 +151,10 @@ pub struct ResourceRegistration {
     pub ctor: ResCtor,
 }
 
-// 声明「本 crate 收集 `ResourceRegistration` 条目」。各处 `resource_register!` 的条目 link 期汇入。
+// 声明「本 crate 收集 `ResourceRegistration` 条目」。各处 `resource_register!` 的条目通过初始化机制登记。
 inventory::collect!(ResourceRegistration);
 
-/// 枚举所有已注册资源类型（link 期汇总的全局表）。
+/// 枚举所有已注册资源类型（初始化登记的全局表）。
 /// Iterate over every registered resource type.
 pub fn resource_registrations() -> impl Iterator<Item = &'static ResourceRegistration> {
     inventory::iter::<ResourceRegistration>.into_iter()

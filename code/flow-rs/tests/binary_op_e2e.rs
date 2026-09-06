@@ -77,12 +77,52 @@ async fn sandbox_runs_single_binary_op() {
 
 #[tokio::test]
 async fn sandbox_surfaces_node_error() {
-    // op="/" 是未知运算符：节点 exec 返回 Err(Arg)，该错误经节点任务收尾一路抬到
+    // op="%" 是未知运算符：节点 exec 返回 Err(Arg)，该错误经节点任务收尾一路抬到
     // Sandbox::start 的返回值（而非静默吞掉）。
-    let args: flow_rs::config::Args = toml::from_str(r#"op = "/""#).unwrap();
+    let args: flow_rs::config::Args = toml::from_str(r#"op = "%""#).unwrap();
     let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
     sb.add_data("a", vec![1i32]).add_data("b", vec![2i32]);
 
     let result: Result<()> = sb.start().await;
     assert!(matches!(result, Err(Error::Arg { .. })));
+}
+
+// 原版 Getting started 的四种运算都要验证；元信息必须来自左输入。
+#[tokio::test]
+async fn all_operations_preserve_left_envelope_metadata() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for (op, expected) in [("+", 9), ("-", 5), ("*", 14), ("/", 3)] {
+            let template = BINARY_OP_GRAPH.replace("op=\"+\"", &format!("op=\"{op}\""));
+            let mut g = Builder::default().template(template).build().unwrap();
+            let a = g.input("a").unwrap();
+            let b = g.input("b").unwrap();
+            let mut c = g.take_output("c").unwrap();
+            let handle = g.start();
+            let metadata = Arc::new(String::from("left-frame"));
+            let mut left = Envelope::new(7i32);
+            left.info_mut().partial_id = Some(42);
+            left.info_mut().extra_data = Some(metadata.clone());
+            a.send(left).await.unwrap();
+            let mut right = Envelope::new(2i32);
+            right.info_mut().partial_id = Some(99);
+            b.send(right).await.unwrap();
+            let mut result = c.recv::<i32>().await.unwrap();
+            assert_eq!(result.unpack(), expected);
+            assert_eq!(result.info().partial_id, Some(42));
+            let carried = result
+                .info()
+                .extra_data
+                .clone()
+                .unwrap()
+                .downcast::<String>()
+                .unwrap();
+            assert!(Arc::ptr_eq(&metadata, &carried));
+            drop(a);
+            drop(b);
+            g.stop();
+            handle.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .expect("图应在五秒内完成四种运算并退出");
 }

@@ -1,0 +1,5 @@
+error: 端口名重复或使用了保留字段 input_closed
+ --> tests/ui/field_collision.rs:3:11
+  |
+3 | #[outputs(out)]
+  |           ^^^

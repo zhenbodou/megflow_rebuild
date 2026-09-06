@@ -23,9 +23,9 @@ ty = "Doubler"     # ← 只有这个类型名
 
 它们分布在互不相识的 crate 中，却要在**程序跑起来之前**汇成同一张全局表。这就是「**编译期分布式注册**」——每个节点在自己的定义处「报个到」，链接时自动汇总。
 
-原版 MegFlow 为此**自建**了一套机制：`#[flow_rs::ln]` 属性宏把节点包装成注册条目，塞进一个 `lazy_static` 全局表，首次访问时在运行时完成注册。能用，但那是一套需要自己维护的基础设施。
+原版的 `node_register!` 经 `submit!` 生成 `#[flow_rs::ctor]` 初始化函数，调用运行时注册接口写入 lazy_static 管理的表。原版没有 `#[flow_rs::ln]` 这个入口；源码路径是 `flow-derive/src/node.rs`、`internal.rs` 与 `flow-rs/src/registry.rs`。
 
-我们**换成成熟的公共 crate [`inventory`]**。它把「分布式注册」这件事做成了库，用链接器的 section 收集机制——各处提交的条目在 **link 阶段**就拼进一张表，运行时直接枚举。**少一套要自己维护的机制，也没有 lazy_static 首次访问的运行时开销**。这正是本书的一贯取舍：能用生态里打磨好的公共 crate，就不自己造。
+我们使用公共 crate `inventory` 管理类型化的分散条目。它生成静态数据和初始化入口，链接进应用后由平台初始化机制登记，运行时枚举。它也有初始化成本，不能未经测量就宣称比原版快；Ch2.4a 用完整实验解释这条路径。
 
 ## 2. inventory：三个动作
 
@@ -35,7 +35,7 @@ ty = "Doubler"     # ← 只有这个类型名
 - **`inventory::submit! { EXPR }`**：在**任意 crate**提交一条 `T` 类型的条目。`EXPR` 必须能在 `static` 上下文里 const 构造。可以有任意多处 `submit!`，分散在任意多个 crate。
 - **`inventory::iter::<T>`**：一个实现了 `IntoIterator<Item = &'static T>` 的值，枚举**所有** `submit!` 进来的条目。
 
-关键在于「什么时候汇总」：不是运行时，而是**链接期**。每个 `submit!` 生成一个带 `#[used]` 的静态变量，落进一个特定的 linker section；`iter` 遍历这个 section。于是「分散提交、集中枚举」在二进制链接完成时就已成型：
+关键是分开宏展开、链接和初始化三个阶段。`submit!` 生成静态数据与初始化入口；链接器保留对应项；平台初始化时完成登记；`iter` 在运行时遍历已登记的条目。枚举顺序没有保证：
 
 ```mermaid
 flowchart TB
@@ -46,14 +46,15 @@ flowchart TB
     subgraph crateB["下游 crate（业务节点）"]
         B1["submit! { MyDetector 条目 }"]
     end
-    A1 --> L["link 期：汇入同一 linker section"]
+    A1 --> L["链接静态数据与初始化入口"]
     A2 --> L
     B1 --> L
-    L --> I["inventory::iter::&lt;NodeRegistration&gt;<br/>运行时枚举全表"]
+    L --> C["平台初始化：登记条目"]
+    C --> I["inventory::iter::&lt;NodeRegistration&gt;<br/>运行时枚举全表"]
     I --> R["find(&quot;Doubler&quot;) → 构造器"]
 ```
 
-对比原版：原版的表在**运行时**由首次访问触发填充（lazy_static + 运行时 register 调用）；inventory 的表在**链接期**就定死了，`iter` 只是读。少了一层运行时机制。
+两者都涉及初始化；本章的直接收益是用公共库承载注册基础设施。节点类型必须进入最终应用的链接结果，登记顺序不能作为业务约定。
 
 ## 3. 注册表模块：`registry.rs`
 
@@ -88,7 +89,7 @@ pub fn find(name: &str) -> Option<&'static NodeRegistration> {
 
 两个值得停下的点：
 
-**① `NodeCtor` 为什么是裸函数指针 `fn(..)`，而不是 `Box<dyn Fn(..)>`？** 因为 `NodeRegistration` 要能在 `submit!` 的 **`static` 上下文里 const 构造**。函数指针（指向一个具体的 `build` 函数）是 const 值；`Box<dyn Fn>` 需要堆分配，不是 const。用 `fn` 指针，条目就能整个塞进 linker section。
+**① `NodeCtor` 为什么是裸函数指针 `fn(..)`，而不是 `Box<dyn Fn(..)>`？** 因为 `NodeRegistration` 要能在 `submit!` 的 **`static` 上下文里 const 构造**。函数指针（指向一个具体的 `build` 函数）是 const 值；`Box<dyn Fn>` 需要堆分配，不是 const。用 `fn` 指针，条目可以静态保存。
 
 **② `collect!` 的位置约束。** 它必须写在**定义 `NodeRegistration` 的 crate**（flow-rs）里、模块级。这是 inventory 的硬性要求——收集点与类型定义绑定。下游 crate 只 `submit!`，不 `collect!`。
 
@@ -199,7 +200,7 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
 }
 ```
 
-`ctor` 那行是点睛：`<Doubler as BuildFromPorts>::build` 是个**函数项**，在 `ctor: NodeCtor`（fn 指针）的位置会自动强制成 fn 指针——于是条目 const 可构造、能进 linker section。
+`ctor` 那行是点睛：`<Doubler as BuildFromPorts>::build` 是个**函数项**，在 `ctor: NodeCtor`（fn 指针）的位置会自动强制成 fn 指针——于是条目 const 可构造、可作为静态条目。
 
 **卫生化：这里用绝对路径 `flow_rs::`，而 Ch2.3 派生宏用裸名。** 为什么不一致？
 
@@ -255,7 +256,7 @@ async fn build_via_registry_and_run() {
 }
 ```
 
-`find("Doubler")` 命中的，正是 `node_register!` 在编译期提交、链接期汇总进表的那条。这就是 Part 3 Graph Builder 的底座：**它拿到 TOML 里的类型名，`find` 出构造器，把节点造出来接进图**。
+`find("Doubler")` 命中的，正是 `node_register!` 生成并随应用链接、初始化登记的那条。这就是 Part 3 Graph Builder 的底座：**它拿到 TOML 里的类型名，`find` 出构造器，把节点造出来接进图**。
 
 顺带，**同名巧合第三次出现**：`BuildFromPorts` 既是 trait（`flow_rs::registry`，类型命名空间）又是派生宏（`flow_derive`，宏命名空间），和 `Node`/`Actor` 一样共存——测试里两个都 `use` 了，各归其位。
 
@@ -266,7 +267,7 @@ async fn build_via_registry_and_run() {
 
 ## 小结
 
-- **编译期分布式注册**：节点分散在各 crate，却要在运行前汇成一张全局表。用 `inventory`（link 期 section 收集）替换原版自建的 `#[flow_rs::ln]` + lazy_static——少一套要维护的机制、无运行时首次开销。
+- **编译期分布式注册**：节点分散在各 crate，却要在运行前汇成一张全局表。用 inventory 的静态条目与初始化机制承载注册，替换原版自建的 ctor + lazy_static 路径；仍需验证业务语义与成本。
 - **三个动作**：`collect!`（定义 crate 声明收集）、`submit!`（任意 crate 提交、须 const 构造）、`iter`（枚举）。`NodeCtor` 用**裸函数指针**正是为了让条目能进 `static` 上下文。
 - **`BuildFromPorts` 派生宏**：按字段类型/名字**位置接线**（`ins`/`outs` 按声明顺序 `remove`）。命名接线（TOML `PortInfo`）留到 Part 3。
 - **函数式宏 `node_register!`**：过程宏的**第三种形态**。自定义 `Parse` 解析 `"名字", 类型`，生成 `submit!`。它用**绝对路径** `flow_rs::`（下游视角），与派生宏的裸名策略对照——也点明了 Part 4 内部用宏时 `proc-macro-crate` 的必要性。

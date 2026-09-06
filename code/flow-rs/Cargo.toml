@@ -20,3 +20,7 @@ futures-util = { workspace = true }
 
 [lib]
 doctest = false
+
+[dev-dependencies]
+# 异步回归测试用超时检测死锁。
+tokio = { workspace = true, features = ["time"] }

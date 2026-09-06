@@ -1,0 +1,5 @@
+error: expected string literal
+ --> tests/ui/register_name.rs:3:16
+  |
+3 | node_register!(123, Broken);
+  |                ^^^

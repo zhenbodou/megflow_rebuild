@@ -39,10 +39,11 @@ impl BinaryOp {
             "+" => x + y,
             "-" => x - y,
             "*" => x * y,
+            "/" => x / y,
             other => return Err(Error::Arg { key: "op".into(), msg: format!("未知运算符 {other:?}") }),
         };
         if let Some(out) = self.c.as_ref() {
-            out.send(Envelope::new(r)).await?;
+            out.send(ea.repack(r)).await?;
         }
         Ok(())
     }
@@ -222,3 +223,21 @@ assert!(matches!(result, Err(Error::Arg { .. })));
 - **两条路径**（完整图 + Sandbox）从两个入口验同一个 `1 + 2 == 3`：一条证引擎、一条给工具。
 
 **Part 3 到此完结**——引擎从「一段 TOML」到「跑出结果」的主干全部打通。下一部 **Part 4** 转向**内置节点与高级特性**：先补上节点间的**内连** `connections`（`a→b` 成链，不再只靠对外端口），再造 `bcast` 广播 / `merge` / `demux` / `reorder`、`Resource` 与 `Context` 共享、子图 `subgraph`——把这台最小引擎，长成能承载真实算法流水线的样子。
+
+
+## 补充验收：算对数值还不够
+
+原版 `flow-rs/src/lib.rs` 的 BinaryOp 支持四则运算，并用左输入的
+`ea.repack(result)` 保留元信息。这里不能用 `Envelope::new(r)`：它会把
+`partial_id` 和 `extra_data` 重置，后续按帧关联结果就会失败。
+
+1. 在 `code/flow-rs/tests/binary_op_e2e.rs` 添加四种运算的图测试，输入为 7 和 2，预期依次为 9、5、14、3。
+2. 给左输入的 `partial_id` 写入 42，右输入写入 99；输出必须保留 42。
+3. 给左输入附上一个 `Arc<String>`，检查输出仍指向同一份附带数据。
+4. 用五秒超时包住测试，防止接收或停机死锁让测试无限等待。
+5. 在 `code/` 执行 `cargo test -p flow-rs --test binary_op_e2e`。
+
+参考实现中的 `all_operations_preserve_left_envelope_metadata` 是完整测试。
+整数除法截断小数；本节点与原版示例一样使用 Rust 的整数运算，除零及
+`i32::MIN / -1` 会 panic。生产业务若要改为结构化错误，应明确记录为行为变更，
+不能把它当作已经证明与原版一致。

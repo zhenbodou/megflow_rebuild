@@ -175,7 +175,7 @@ fn output_field_idents(input: &DeriveInput) -> Vec<Ident> {
 }
 ```
 
-> 这不是我们发明的土办法——**原版 flow-derive 就是这么干的**：它把端口类型名列成常量表（`OUT_T = ["Sender", "SenderT"]`、`IN_T = ["Receiver", "ReceiverT"]`），靠匹配类型名来分类端口。宏在语法层工作，看到的只是 token，「类型名字符串」往往就是最实在的判据。
+> 上述 contains 是早期教学写法，不能用于可靠分类。核对原版 `flow-derive/src/utils.rs` 可见，它检查 Type::Path 的末段及泛型内层类型。当前重写也已改用语法树精确识别 `Receiver`、`Option<Sender>` 和 `Vec` 端口，避免误将 HistorySender 业务状态关闭；见 Ch2.3a。
 
 生成 `impl Node`：
 
@@ -195,33 +195,17 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
 
 - `close`：`quote` 的重复语法 `#( self.#outs = None; )*` 为每个输出字段生成一行置 `None`。
 - `is_all_input_closed`：读 `#[inputs]` 注入的 `self.input_closed` 标志。
-- **`split_for_impl()` 处理泛型**——这正是 Ch2.2 里 `TypeName` 刻意后置、承诺本章补上的点。它把泛型拆成三段：`impl_generics`（`<T>`）、`type_generics`（`<T>`）、`where_clause`，拼成正确的 `impl<T> Node for Foo<T> where ..`。我们用一个泛型结构体单元测试证明生成的 `impl<T> Node for G<T>` 良构。
+- **`split_for_impl()` 处理泛型**——这与 Ch2.2b 的 `TypeName` 使用同一个处理方式。它把泛型拆成三段：`impl_generics`（`<T>`）、`type_generics`（`<T>`）、`where_clause`，拼成正确的 `impl<T> Node for Foo<T> where ..`。我们用一个泛型结构体单元测试证明生成的 `impl<T> Node for G<T>` 良构。
 
 ## 4. `#[derive(Actor)]`：近乎常量的模板
 
 `start` 的三段式循环**不依赖任何字段信息**——它只调固有方法 `initialize`/`exec`/`finalize` 和 `Node` 的 `is_all_input_closed`/`close`。所以这个宏几乎是常量模板，只按类型名 + 泛型参数化：
 
 ```rust,ignore
-pub fn expand_derive_actor(input: &DeriveInput) -> TokenStream2 {
-    let name = &input.ident;
-    let (ig, tg, wc) = input.generics.split_for_impl();
-    quote! {
-        impl #ig Actor for #name #tg #wc {
-            fn start(mut self: Box<Self>) -> tokio::task::JoinHandle<Result<()>> {
-                tokio::spawn(async move {
-                    self.initialize().await;
-                    while !self.is_all_input_closed() { self.exec().await?; }
-                    self.close();
-                    self.finalize().await;
-                    Ok(())
-                })
-            }
-        }
-    }
-}
+{{#include ../../../code/flow-derive/src/node.rs:actor_expansion}}
 ```
 
-与 Ch2.1 手写的 `start` 逐字节一致——只不过现在由宏生成。
+这里展示当前参考实现：Context 在初始化阶段传入；exec 循环放在内层 async，业务错误也会经过 close 和 finalize。Ch2.3a 用回归测试解释为什么不能把循环中的 `?` 直接放在最外层任务体。
 
 ## 5. `#[methods]`：改写 impl 块
 

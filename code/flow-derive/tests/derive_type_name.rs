@@ -31,3 +31,20 @@ fn struct_reports_its_name() {
 fn enum_reports_its_name() {
     assert_eq!(Color::type_name(), "Color");
 }
+
+// 声明中包含生命周期、默认类型参数、const 泛型和 where 子句。
+#[derive(TypeName)]
+#[allow(dead_code)]
+struct Generic<'a, T = String, const N: usize = 2>
+where
+    T: AsRef<str>,
+{
+    values: &'a [T; N],
+}
+
+#[test]
+fn generics_lifetimes_defaults_and_where_clause_compile() {
+    type DefaultGeneric = Generic<'static>;
+    assert_eq!(DefaultGeneric::type_name(), "Generic");
+    assert_eq!(Generic::<'static, String, 4>::type_name(), "Generic");
+}

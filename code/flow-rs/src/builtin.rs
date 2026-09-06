@@ -24,7 +24,6 @@
 use flow_derive::{
     inputs, methods, node_register, outputs, resource_register, Actor, BuildFromPorts, Node,
 };
-use flow_message::Envelope;
 use flow_rs::channel::{Receiver, Sender};
 use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
@@ -35,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// 二元整数运算节点：从输入端口 `a`、`b` 各取一个 `i32`，按参数 `op` 运算，结果发往
-/// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"`；其余值 → `Err(Error::Arg)`。
+/// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"` / `"/"`；其余值 → `Err(Error::Arg)`。
 ///
 /// 这正是 Ch0.3 验收契约里那张图用的节点类型（TOML 里 `ty="BinaryOp"`）。它刻意做得极小：
 /// 全书第一个「真能跑」的节点，重点是打通「配置 → 装配 → 调度 → 计算 → 出结果」这条链，
@@ -62,6 +61,7 @@ impl BinaryOp {
             "+" => x + y,
             "-" => x - y,
             "*" => x * y,
+            "/" => x / y,
             other => {
                 return Err(Error::Arg {
                     key: "op".into(),
@@ -71,7 +71,7 @@ impl BinaryOp {
         };
         // `c` 是 `Option<Sender>`——`close()` 会把它置 `None`。仍在时才发。
         if let Some(out) = self.c.as_ref() {
-            out.send(Envelope::new(r)).await?;
+            out.send(ea.repack(r)).await?;
         }
         Ok(())
     }
@@ -181,7 +181,7 @@ node_register!("Bcast", Bcast);
 /// 与 `Bcast` 对偶，但**扇入本可以不要节点**——mpsc 本就多生产者，多个上游 clone 同一个
 /// `Sender` 发往一条 channel 即可（Ch4.1 的经典扇入就是这么做的，无需 `Merge`）。`Merge` 的
 /// 存在价值是另一种扇入语义：上游各自持有**独立** channel（互不背压、可分别关闭），由本节点
-/// **公平地轮询**它们——这正是 `Vec<Receiver>` 而非「一条共享 channel」的意义。
+/// **按 future 顺序尝试接收**它们（不保证公平）——这正是 `Vec<Receiver>` 而非「一条共享 channel」的意义。
 ///
 /// 实现用 `futures_util::future::select_ok`：它并发 race 一组 future，返回**第一个成功**的结果，
 /// 且**跳过**先返回 `Err` 的（某路已关闭 → `ChannelClosed` 是 `Err`，会被跳过，继续等其余路），

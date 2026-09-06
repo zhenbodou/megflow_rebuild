@@ -24,7 +24,7 @@ use syn::{
 };
 
 /// 造一个「命名字段」`name: ty`（默认可见性）。syn 的 `Field` 不实现 `Parse`
-/// （单个字段的「命名/元组」二义），故手工构造字段字面量而非 `parse_quote!`。
+/// （单个字段的「命名/元组」二义）；这里手工构造，也可使用 syn 提供的字段解析入口。
 fn named_field(name: Ident, ty: Type) -> Field {
     Field {
         attrs: vec![],
@@ -36,10 +36,55 @@ fn named_field(name: Ident, ty: Type) -> Field {
     }
 }
 
-/// 判断一个类型的 token 串（去空格后）是否包含某子串——用来**按类型名分类端口**。
-/// 这正是原版 flow-derive 的做法（它把 `Sender`/`Receiver` 等类型名列成常量表）。
-fn type_contains(ty: &Type, needle: &str) -> bool {
-    quote!(#ty).to_string().replace(' ', "").contains(needle)
+/// 按语法树精确匹配路径末段，不能用字符串包含（会误伤 HistorySender）。
+fn type_is(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Path(path) if path.qself.is_none()
+        && path.path.segments.last().is_some_and(|segment|
+            segment.ident == name && matches!(segment.arguments, syn::PathArguments::None)))
+}
+
+/// 只识别本引擎明确支持的单层容器，且要求恰好一个类型实参。
+fn wrapped_type<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
+    let Type::Path(path) = ty else { return None };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1 {
+        return None;
+    }
+    match arguments.args.first()? {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortKind {
+    Input,
+    InputArray,
+    Output,
+    OutputArray,
+}
+
+fn port_kind(ty: &Type) -> Option<PortKind> {
+    if type_is(ty, "Receiver") {
+        return Some(PortKind::Input);
+    }
+    if wrapped_type(ty, "Option").is_some_and(|inner| type_is(inner, "Sender")) {
+        return Some(PortKind::Output);
+    }
+    match wrapped_type(ty, "Vec") {
+        Some(inner) if type_is(inner, "Receiver") => Some(PortKind::InputArray),
+        Some(inner) if type_is(inner, "Sender") => Some(PortKind::OutputArray),
+        _ => None,
+    }
 }
 
 /// 一个端口声明：端口名 + 是否为**数组端口**（名字后跟 `[]`）。
@@ -49,7 +94,7 @@ fn type_contains(ty: &Type, needle: &str) -> bool {
 /// （`Vec<Receiver>` / `Vec<Sender>`）——这是扇入（Merge）/ 扇出（Bcast）的地基（Ch4.2）。
 /// 语法上我们用**裸的空方括号** `name[]`；原版写作 `name:[T0]`（带每端口类型变量），但重写
 /// 版的 channel 在字段层是**未类型化**的（都搬 `SealedEnvelope`），无需那套类型变量机制，
-/// 故取更简的写法（方括号内即便写了东西也一律忽略）。
+/// 故取更简的写法（空方括号表示端口组，不表示数组长度）。
 pub struct PortSpec {
     /// 端口名（注入结构体的字段名，也是注册表端口名表里的名字）。
     pub name: Ident,
@@ -60,11 +105,14 @@ pub struct PortSpec {
 impl Parse for PortSpec {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name: Ident = input.parse()?;
-        // 名字后可选 `[...]` → 标记为数组端口；括号内内容一律忽略（消费掉即可）。
+        // 名字后可选 `[]` → 标记为数组端口；非空括号是误用，不能静默忽略。
         let array = input.peek(syn::token::Bracket);
         if array {
-            let _bracket_content;
-            syn::bracketed!(_bracket_content in input);
+            let content;
+            syn::bracketed!(content in input);
+            if !content.is_empty() {
+                return Err(content.error("数组端口请写 name[]，方括号内不能指定长度或类型"));
+            }
         }
         Ok(PortSpec { name, array })
     }
@@ -83,6 +131,20 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
             let msg = "#[inputs] 只能用于具名字段结构体（struct X { .. }）";
             return syn::Error::new_spanned(ident, msg).to_compile_error();
         };
+        let mut names: std::collections::HashSet<String> = named
+            .named
+            .iter()
+            .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+            .collect();
+        for spec in specs {
+            if !names.insert(spec.name.to_string()) || spec.name == "input_closed" {
+                return syn::Error::new_spanned(
+                    &spec.name,
+                    "端口名重复或使用了保留字段 input_closed",
+                )
+                .to_compile_error();
+            }
+        }
         for spec in specs {
             // 数组端口 → Vec<Receiver>（一名多端，扇入）；标量端口 → 单个 Receiver。
             let ty: Type = if spec.array {
@@ -91,6 +153,17 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
                 parse_quote!(Receiver)
             };
             named.named.push(named_field(spec.name.clone(), ty));
+        }
+        if named
+            .named
+            .iter()
+            .any(|field| field.ident.as_ref().is_some_and(|id| id == "input_closed"))
+        {
+            return syn::Error::new_spanned(
+                &item,
+                "input_closed 是 #[inputs] 的保留字段，请勿手写或重复使用 #[inputs]",
+            )
+            .to_compile_error();
         }
         named
             .named
@@ -109,6 +182,20 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
             let msg = "#[outputs] 只能用于具名字段结构体（struct X { .. }）";
             return syn::Error::new_spanned(ident, msg).to_compile_error();
         };
+        let mut names: std::collections::HashSet<String> = named
+            .named
+            .iter()
+            .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+            .collect();
+        for spec in specs {
+            if !names.insert(spec.name.to_string()) || spec.name == "input_closed" {
+                return syn::Error::new_spanned(
+                    &spec.name,
+                    "端口名重复或使用了保留字段 input_closed",
+                )
+                .to_compile_error();
+            }
+        }
         for spec in specs {
             // 数组端口 → Vec<Sender>（一名多端，扇出）；标量端口 → Option<Sender>。
             let ty: Type = if spec.array {
@@ -122,16 +209,24 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
     quote! { #item }
 }
 
-/// 收集输出端口字段：`(字段名, 是否数组端口)`。判据仍是「类型 token 含 `Sender`」；
-/// 其中类型再含 `Vec` 的（`Vec<Sender>`）即数组端口，否则是标量端口（`Option<Sender>`）。
+/// 收集输出端口字段：`(字段名, 是否数组端口)`。用 port_kind 精确识别
+/// Vec<Sender> 与 Option<Sender>，避免把业务类型 HistorySender 当成端口。
 /// `close()` 据此选择「置 `None`」还是「清空 `Vec`」。
 fn output_fields(input: &DeriveInput) -> Vec<(Ident, bool)> {
     let mut outs = Vec::new();
     if let Data::Struct(data) = &input.data {
         for f in data.fields.iter() {
             if let Some(id) = &f.ident {
-                if type_contains(&f.ty, "Sender") {
-                    outs.push((id.clone(), type_contains(&f.ty, "Vec")));
+                if f.attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("state"))
+                {
+                    continue;
+                }
+                match port_kind(&f.ty) {
+                    Some(PortKind::Output) => outs.push((id.clone(), false)),
+                    Some(PortKind::OutputArray) => outs.push((id.clone(), true)),
+                    _ => {}
                 }
             }
         }
@@ -175,6 +270,7 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
 /// Ch4.3 起 `start` 多收一个 `ctx: Context` 参数并 `move` 进 spawn 出的 future，只在
 /// `initialize(&ctx)` 一处传入——`exec`/`finalize` 签名一律不变（几十个节点的 `exec` 一个不改，
 /// 这正是把 `Context` **只穿过 `initialize`** 的意义所在）。
+// ANCHOR: actor_expansion
 pub fn expand_derive_actor(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
@@ -186,17 +282,22 @@ pub fn expand_derive_actor(input: &DeriveInput) -> TokenStream2 {
             ) -> tokio::task::JoinHandle<Result<()>> {
                 tokio::spawn(async move {
                     self.initialize(&ctx).await;
-                    while !self.is_all_input_closed() {
-                        self.exec().await?;
-                    }
+                    // ? 只提前退出内层 future；外层仍执行 close/finalize。
+                    let result = async {
+                        while !self.is_all_input_closed() {
+                            self.exec().await?;
+                        }
+                        Ok(())
+                    }.await;
                     self.close();
                     self.finalize().await;
-                    Ok(())
+                    result
                 })
             }
         }
     }
 }
+// ANCHOR_END: actor_expansion
 
 /// `#[methods]`：改写节点的固有 `impl` 块。
 /// 1. 把用户写的 `exec` 重命名为私有 `__megflow_exec_inner`；
@@ -301,8 +402,11 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
             let is_state = f.attrs.iter().any(|a| a.path().is_ident("state"));
             let init = if is_state {
                 quote! { Default::default() }
-            } else if type_contains(&f.ty, "Sender") {
-                let is_array = type_contains(&f.ty, "Vec");
+            } else if matches!(
+                port_kind(&f.ty),
+                Some(PortKind::Output | PortKind::OutputArray)
+            ) {
+                let is_array = port_kind(&f.ty) == Some(PortKind::OutputArray);
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
                 if is_array {
@@ -310,8 +414,11 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 } else {
                     quote! { Some(outs.remove(0).remove(0)) } // 标量：取组里唯一的 Sender
                 }
-            } else if type_contains(&f.ty, "Receiver") {
-                let is_array = type_contains(&f.ty, "Vec");
+            } else if matches!(
+                port_kind(&f.ty),
+                Some(PortKind::Input | PortKind::InputArray)
+            ) {
+                let is_array = port_kind(&f.ty) == Some(PortKind::InputArray);
                 input_names.push(LitStr::new(&id.to_string(), id.span()));
                 input_array.push(is_array);
                 if is_array {
@@ -429,6 +536,25 @@ mod tests {
         PortSpec {
             name: id(s),
             array: true,
+        }
+    }
+
+    #[test]
+    fn port_classification_uses_structure_not_substrings() {
+        for (syntax, expected) in [
+            ("flow_rs::channel::Receiver", Some(PortKind::Input)),
+            (
+                "std::vec::Vec<flow_rs::channel::Sender>",
+                Some(PortKind::OutputArray),
+            ),
+            ("Option<Sender>", Some(PortKind::Output)),
+            ("Vec<Receiver>", Some(PortKind::InputArray)),
+            ("Option<HistorySender>", None),
+            ("SenderConfig", None),
+            ("Vec<Option<Sender>>", None),
+        ] {
+            let ty: Type = parse_str(syntax).unwrap();
+            assert_eq!(port_kind(&ty), expected, "{syntax}");
         }
     }
 

@@ -13,3 +13,7 @@ proc-macro2 = { workspace = true }
 quote = { workspace = true }
 # Ch2.3 起解析 struct/impl 需要 syn 的完整语法（ItemStruct/ItemImpl/ImplItemFn）。
 syn = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+# 验证宏对非法 Rust 输入的编译诊断。
+trybuild = "1"

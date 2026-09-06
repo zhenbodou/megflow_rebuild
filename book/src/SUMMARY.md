@@ -6,7 +6,8 @@
 
 - [Ch0.1 什么是 dataflow / actor，MegFlow 全景](part0/ch01-panorama.md)
 - [Ch0.2 开发环境与项目骨架](part0/ch02-environment.md)
-- [Ch0.3 跑通真实 flow-rs，钉死验收标准](part0/ch03-reference.md)
+- [Ch0.3 对照原版示例，建立首个验收标准](part0/ch03-reference.md)
+- [Ch0.4 完整重构的验收账本](part0/ch04-completeness-audit.md)
 
 # 第 1 部分 · 消息与异步地基
 
@@ -17,10 +18,16 @@
 
 # 第 2 部分 · 节点与过程宏
 
+- [Ch2.0 宏从零开始：macro_rules! 与展开](part2/ch00-macro-rules.md)
 - [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）](part2/ch01-node-trait.md)
 - [Ch2.2 过程宏入门：proc-macro2 / syn / quote](part2/ch02-proc-macro-intro.md)
+- [Ch2.2a Token → AST → Token：三个 crate 实操](part2/ch02a-token-workshop.md)
+- [Ch2.2b 独立小工程：三种过程宏与泛型](part2/ch02b-three-forms.md)
 - [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏](part2/ch03-node-macros.md)
+- [Ch2.3a 宏工程化：错误定位、trybuild 与生命周期](part2/ch03a-macro-engineering.md)
 - [Ch2.4 node_register! 与 inventory 编译期注册表](part2/ch04-registry.md)
+
+- [Ch2.4a 注册实操、crate 协作与原版宏清单](part2/ch04a-crates-and-parity.md)
 
 # 第 3 部分 · 图与运行时
 

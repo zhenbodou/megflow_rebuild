@@ -1,0 +1,5 @@
+error: 端口名重复或使用了保留字段 input_closed
+ --> tests/ui/duplicate_ports.rs:3:15
+  |
+3 | #[inputs(inp, inp)]
+  |               ^^^

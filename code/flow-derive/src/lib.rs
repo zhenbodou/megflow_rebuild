@@ -4,7 +4,7 @@
 //! 运行——输入是一段代码的 **token 流**，输出也是 token 流。这就是「用代码生成代码」。
 //! 三件套各司其职：
 //! - **`proc-macro2`**：token 流的类型（`proc_macro2::TokenStream`）。编译器自带的
-//!   `proc_macro::TokenStream` 只能在宏入口用、无法单元测试；`proc-macro2` 是它的
+//!   `proc_macro::TokenStream` 需要宏执行上下文，不适合普通单元测试；`proc-macro2` 是它的
 //!   可测镜像，生态里 syn/quote 都围绕它。
 //! - **`syn`**：把 token 流**解析**成语法树（如 [`DeriveInput`] = 一个带属性的
 //!   struct/enum 定义）。
@@ -31,7 +31,7 @@ use node::PortSpec;
 ///
 /// 入门宏，刻意**自包含**——生成固有方法、不引用任何 trait，聚焦三件套本身。
 /// （生成的代码引用「外部 trait 该住哪」这个话题留到 Ch2.3 的 `derive(Node)`。）
-/// 类型名字符串会在 Ch2.4 的 `node_register!` 里用作注册表 key。
+/// 本宏用于练习类型名生成；node_register! 的注册 key 由调用者显式传入。
 ///
 /// Derive macro generating `Foo::type_name() -> &'static str`.
 #[proc_macro_derive(TypeName)]
@@ -120,19 +120,21 @@ pub fn resource_register(input: TokenStream) -> TokenStream {
 /// 把「编译期 API 边界」（`proc_macro`，只入口用）与「可测的生成逻辑」
 /// （`proc_macro2`）分开，是过程宏的标准工程模式——于是 `expand_*` 能被下面的
 /// `#[cfg(test)]` 单元测试直接调用、比对生成的 token。
+// ANCHOR: type_name_expansion
 fn expand_type_name(input: &DeriveInput) -> proc_macro2::TokenStream {
     let name = &input.ident; // 结构体/枚举名，如 `Foo`
     let name_str = name.to_string(); // "Foo"
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     quote! {
-        impl #name {
+        impl #impl_generics #name #type_generics #where_clause {
             pub const fn type_name() -> &'static str {
                 #name_str
             }
         }
     }
-    // 注：此处未处理泛型（`impl<T> Foo<T>`）。泛型的 `split_for_impl` 留到 Ch2.3 的
-    // `#[derive(Node)]`——那里必须处理。本入门示例针对无泛型类型。
+    // 泛型声明、类型实参、where 子句各有位置，不能重复插入整个 generics。
 }
+// ANCHOR_END: type_name_expansion
 
 #[cfg(test)]
 mod tests {

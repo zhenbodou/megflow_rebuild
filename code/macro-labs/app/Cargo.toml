@@ -1,0 +1,7 @@
+[package]
+name = "macro-lab-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macro-lab-derive = { path = "../derive" }

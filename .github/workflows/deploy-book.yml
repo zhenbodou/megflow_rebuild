@@ -40,6 +40,17 @@ jobs:
             mdbook-toc@${MDBOOK_TOC_VERSION} \
             mdbook-mermaid@${MDBOOK_MERMAID_VERSION}
 
+      - name: Select Rust version for diagnostic snapshots
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup override set 1.98.1
+
+      - name: Validate Rust implementation
+        run: cargo test --manifest-path code/Cargo.toml --workspace --locked
+
+      - name: Validate runnable macro course and checkpoints
+        run: python3 scripts/check_macro_course.py
+
       - name: Build book
         run: mdbook build book
 

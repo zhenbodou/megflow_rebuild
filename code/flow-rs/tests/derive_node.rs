@@ -80,3 +80,73 @@ async fn macro_doubler_runs_behind_boxed_dyn_actor() {
     drop(in_tx);
     handle.await.unwrap().unwrap();
 }
+
+// 原版 actor.rs 将 exec 循环放进内层 async，确保业务错误也经过 finalize。
+#[inputs]
+#[outputs(out)]
+#[derive(Node, Actor)]
+struct Failing {
+    events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[methods]
+impl Failing {
+    async fn initialize(&mut self, _: &Context) {
+        self.events.lock().unwrap().push("initialize");
+    }
+
+    async fn exec(&mut self) -> Result<()> {
+        self.events.lock().unwrap().push("exec");
+        Err(Error::Arg {
+            key: "test".into(),
+            msg: "expected failure".into(),
+        })
+    }
+
+    async fn finalize(&mut self) {
+        // close 必须早于 finalize，不能只因节点最终析构而误以为主动收尾正确。
+        assert!(self.out.is_none());
+        self.events.lock().unwrap().push("finalize");
+    }
+}
+
+#[tokio::test]
+async fn actor_error_closes_outputs_and_finalizes_once() {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (out, mut receiver) = channel(1);
+        let actor = Box::new(Failing {
+            events: events.clone(),
+            out: Some(out),
+            input_closed: false,
+        });
+        let result = actor.start(Context::anonymous()).await.unwrap();
+        assert!(matches!(result, Err(Error::Arg { key, .. }) if key == "test"));
+        assert_eq!(*events.lock().unwrap(), ["initialize", "exec", "finalize"]);
+        assert!(matches!(
+            receiver.recv::<i32>().await,
+            Err(Error::ChannelClosed)
+        ));
+    })
+    .await
+    .expect("错误路径必须收尾并返回，不能挂起");
+}
+
+struct HistorySender;
+
+// 业务类型恰好含 Sender，不应被 Node::close 当成输出端口关闭。
+#[derive(Node)]
+struct KeepsBusinessState {
+    history: Option<HistorySender>,
+    input_closed: bool,
+}
+
+#[test]
+fn node_close_does_not_erase_business_type_containing_sender() {
+    let mut node = KeepsBusinessState {
+        history: Some(HistorySender),
+        input_closed: false,
+    };
+    node.close();
+    assert!(node.history.is_some());
+}
