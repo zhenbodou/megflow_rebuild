@@ -86,8 +86,8 @@ async fn start_runs_all_nodes_then_stop_shuts_down() {
     let b = g.input("b").unwrap();
     let x = g.input("x").unwrap();
     let y = g.input("y").unwrap();
-    let mut sum = g.take_output("sum").unwrap();
-    let mut prod = g.take_output("prod").unwrap();
+    let sum = g.take_output("sum").unwrap();
+    let prod = g.take_output("prod").unwrap();
 
     a.send(Envelope::new(1i32)).await.unwrap();
     b.send(Envelope::new(2i32)).await.unwrap();

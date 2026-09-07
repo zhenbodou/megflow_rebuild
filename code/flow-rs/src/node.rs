@@ -126,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn doubler_pipes_and_shuts_down() {
         let (in_tx, in_rx) = channel(8);
-        let (out_tx, mut out_rx) = channel(8);
+        let (out_tx, out_rx) = channel(8);
         let node = Box::new(Doubler {
             inp: in_rx,
             out: Some(out_tx),
@@ -155,7 +155,7 @@ mod tests {
     async fn runs_behind_boxed_dyn_actor() {
         // 擦除成 Box<dyn Actor> 后照样能 start——这就是 start 非 async 换来的对象安全。
         let (in_tx, in_rx) = channel(4);
-        let (out_tx, mut out_rx) = channel(4);
+        let (out_tx, out_rx) = channel(4);
         let actor: Box<dyn Actor> = Box::new(Doubler {
             inp: in_rx,
             out: Some(out_tx),

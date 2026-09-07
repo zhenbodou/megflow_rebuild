@@ -187,7 +187,7 @@ impl Sandbox {
         self.subs.insert(
             name.clone(),
             Box::new(move |_, outputs| {
-                let mut rx = outputs.remove(&name).expect("已验证输出端口");
+                let rx = outputs.remove(&name).expect("已验证输出端口");
                 Box::pin(async move {
                     loop {
                         match rx.recv::<T>().await {

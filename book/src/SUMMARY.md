@@ -8,6 +8,7 @@
 - [Ch0.2 开发环境与项目骨架](part0/ch02-environment.md)
 - [Ch0.3 对照原版示例，建立首个验收标准](part0/ch03-reference.md)
 - [Ch0.4 完整重构的验收账本](part0/ch04-completeness-audit.md)
+- [Ch0.5 从看懂代码到独立开发：学习方法与完整示范](part0/ch05-learn-to-build.md)
 
 # 第 1 部分 · 消息与异步地基
 

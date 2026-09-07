@@ -2,7 +2,7 @@ use flow_rs::{channel::channel, prelude::*};
 #[tokio::test]
 async fn zero_capacity_queues_before_consumption_and_drains_on_close() {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let (tx, mut rx) = channel(0);
+        let (tx, rx) = channel(0);
         let other = tx.clone();
         for i in 0..1000u32 {
             other.send(Envelope::new(i)).await.unwrap();

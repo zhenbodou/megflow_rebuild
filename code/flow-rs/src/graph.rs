@@ -182,24 +182,21 @@ impl MainGraph {
         let mut inputs: HashMap<String, Sender> = HashMap::new();
         let mut outputs: HashMap<String, Receiver> = HashMap::new();
 
-        // 对外**输入**：channel 的 Sender 归用户，Receiver 接到目标节点的输入端口。
-        // 一条 channel 只有一个 Receiver，故一个对外输入只能喂一个目标端口——要把一份对外
-        // 输入扇出给多个端口，得在图里放一个 `Bcast` 节点（数组输出端口，见本章），而不能
-        // 靠拆 Receiver（mpsc 单消费者，拆不了）。
+        // 同一对外输入对应一条队列，多个目标竞争接收；广播另用 Bcast。
         for pc in &g.inputs {
-            if pc.ports.len() != 1 {
-                return Err(Error::Unsupported(format!(
-                    "graph input {:?} feeds {} node ports; a single input channel has one \
-                     consumer — use a Bcast node to fan out",
-                    pc.name,
-                    pc.ports.len()
+            if pc.ports.is_empty() {
+                return Err(Error::BadConnection(format!(
+                    "graph input {:?} has no target",
+                    pc.name
                 )));
             }
-            let pref = PortRef::parse(&pc.ports[0])?;
-            let reg = node_reg(g, pref.node)?;
             let (tx, rx) = channel(pc.cap);
             inputs.insert(pc.name.clone(), tx);
-            attach_receiver(&mut node_ins, reg, pref.node, pref.port, rx)?;
+            for port in &pc.ports {
+                let pref = PortRef::parse(port)?;
+                let reg = node_reg(g, pref.node)?;
+                attach_receiver(&mut node_ins, reg, pref.node, pref.port, rx.clone())?;
+            }
         }
 
         // 对外**输出**：channel 的 Receiver 归用户，Sender 接到源节点的输出端口。
@@ -243,11 +240,11 @@ impl MainGraph {
                     });
                 }
             }
-            // mpsc 单消费者：恰 1 个接收端 + ≥1 个发送端，否则这条连接形态非法。
-            if receivers.len() != 1 || senders.is_empty() {
+            // 共享队列：至少一个接收端和一个发送端，多个下游竞争接收。
+            if receivers.is_empty() || senders.is_empty() {
                 return Err(Error::BadConnection(format!(
                     "connection {:?} has {} receiver(s) and {} sender(s); \
-                     need exactly 1 receiver (input port) and ≥1 sender (output port)",
+                     need ≥1 receiver (input port) and ≥1 sender (output port)",
                     conn.ports,
                     receivers.len(),
                     senders.len()
@@ -257,9 +254,11 @@ impl MainGraph {
             let (tx, rx) = channel(conn.cap);
             // 接收端：把这条 channel 的 rx 挂到该输入端口。标量端口重复接 → PortAlreadyConnected；
             // 数组输入端口（Merge 扇入）允许多条连接各挂一个 Receiver，攒成一组。
-            let rcv = receivers[0];
-            let rcv_reg = node_reg(g, rcv.node)?;
-            attach_receiver(&mut node_ins, rcv_reg, rcv.node, rcv.port, rx)?;
+            for rcv in &receivers {
+                let rcv_reg = node_reg(g, rcv.node)?;
+                attach_receiver(&mut node_ins, rcv_reg, rcv.node, rcv.port, rx.clone())?;
+            }
+            drop(rx);
             // 发送端：每个输出端口挂一份 tx.clone()（同一条连接多个发送端即经典扇入）。
             // 标量端口跨连接重复接 → PortAlreadyConnected；数组输出端口（Bcast 扇出）允许
             // 多条连接各挂一个 Sender，攒成一组。

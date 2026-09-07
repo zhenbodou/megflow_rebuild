@@ -94,7 +94,7 @@ async fn builds_and_runs_binary_op() {
     // 从对外输入喂 1、2；从对外输出收 3——名字↔位置的桥若接反，这里立刻变红。
     let a_in = g.input("a").unwrap();
     let b_in = g.input("b").unwrap();
-    let mut c_out = g.take_output("c").unwrap();
+    let c_out = g.take_output("c").unwrap();
     a_in.send(Envelope::new(1i32)).await.unwrap();
     b_in.send(Envelope::new(2i32)).await.unwrap();
     let mut e = c_out.recv::<i32>().await.unwrap();

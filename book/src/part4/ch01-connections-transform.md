@@ -96,36 +96,32 @@ for conn in &g.connections {
 
 > **一个被经验推翻的直觉**：端口名表类型是 `&'static [&'static str]`，而 `pref.port` 是借自配置、**寿命更短**的 `&str`。凭直觉会担心 `reg.outputs.contains(&pref.port)` 因「`&&'static str` 与 `&&'a str` 不同型」编译不过，退而写 `iter().any(|&p| p == pref.port)`。实测：`contains` **能编译**——`&'static str` 对生命周期**协变**，编译器把整个切片的 `'static` 压短到 `'a` 去匹配即可。clippy 还会主动建议把 `any` 换成更省的 `contains`。教训：生命周期能不能过，编译器说了算，纸上推理容易想当然。
 
-**形态校验**才是这段的重点。我们的 channel 是 `mpsc`——**多生产者、单消费者**。一条内部连接对应一条 channel，因此：
+**形态校验**要求至少一个发送端和至少一个接收端。原版 interlayer::Connection
+分别保存 tx/rx 列表，graph/channel.rs 为整条连接创建一份 ChannelStorage；多个下游
+共享队列竞争接收，而不是各得到一份副本。
 
-- **恰好 1 个接收端**：一条 channel 只有一个 `Receiver`，多个消费者是不允许的（真要一份数据喂多路，那是**扇出/广播**，得靠专门的 bcast 节点，见下一章）；
-- **≥1 个发送端**：`Sender` 可 `Clone`，多个上游发往同一下游是 mpsc 天生支持的**扇入**。
+当前 Receiver 已支持 Clone。装配时对每个接收端克隆队列入口；对每个发送端克隆
+Sender。注册表和 attach 函数继续检查端口方向、重复接线以及标量/数组形态。
 
 ```rust,ignore
-    if receivers.len() != 1 || senders.is_empty() {
-        return Err(Error::BadConnection(format!(
-            "connection {:?} has {} receiver(s) and {} sender(s); \
-             need exactly 1 receiver (input port) and ≥1 sender (output port)",
-            conn.ports, receivers.len(), senders.len()
-        )));
-    }
-    let (tx, rx) = channel(conn.cap);
-    // 接收端：rx 挂到该输入端口；端口已被接过 → PortAlreadyConnected。
-    let rcv = receivers[0];
-    let in_slot = node_ins.entry(rcv.node.to_owned()).or_default();
-    if in_slot.contains_key(rcv.port) {
-        return Err(Error::PortAlreadyConnected { node: rcv.node.to_owned(), port: rcv.port.to_owned() });
-    }
-    in_slot.insert(rcv.port.to_owned(), rx);
-    // 发送端：每个输出端口挂一份 tx.clone()（多个即扇入）；同样查重。
-    for snd in &senders {
-        let out_slot = node_outs.entry(snd.node.to_owned()).or_default();
-        if out_slot.contains_key(snd.port) {
-            return Err(Error::PortAlreadyConnected { node: snd.node.to_owned(), port: snd.port.to_owned() });
-        }
-        out_slot.insert(snd.port.to_owned(), tx.clone());
-    }
+if receivers.is_empty() || senders.is_empty() {
+    return Err(Error::BadConnection("连接至少需要一个发送端和一个接收端".into()));
+}
+let (tx, rx) = channel(conn.cap);
+for rcv in &receivers {
+    let reg = node_reg(g, rcv.node)?;
+    attach_receiver(&mut node_ins, reg, rcv.node, rcv.port, rx.clone())?;
+}
+drop(rx);
+for snd in &senders {
+    let reg = node_reg(g, snd.node)?;
+    attach_sender(&mut node_outs, reg, snd.node, snd.port, tx.clone())?;
+}
 ```
+
+这段展示当前装配主干，完整实现位于 code/flow-rs/src/graph.rs。接收端克隆只增加
+队列的使用者，不克隆载荷。处理速度会影响分配，所以不保证两个下游各拿一半。
+要让每个下游都收到所有消息，仍须使用下一章的 Bcast。
 
 这段插在「对外输入/输出」与「逐节点构造」之间：等它跑完，`node_ins`/`node_outs` 里既有对外端口带来的 channel 端、也有内部连接带来的，后面**同一套**「按注册表端口名表排成位置 Vec → 造节点」的逻辑照单全收，一行不用改。
 
@@ -238,9 +234,34 @@ node_register!("NoopConsumer", NoopConsumer);
 ## 小结
 
 - **内部连接 `connections`** 是匿名的节点间边；方向不写在配置里，而是**按端口在注册表里的角色推断**（输出端口→发送端、输入端口→接收端）。
-- mpsc 单消费者定死了连接形态：**恰 1 接收端 + ≥1 发送端（扇入）**；违反 → `BadConnection`，端口重复接线 → `PortAlreadyConnected`，全在 `build()` 当场报错。
+- 共享队列要求连接形态为：**≥1 接收端 + ≥1 发送端**；违反 → `BadConnection`，端口重复接线 → `PortAlreadyConnected`，全在 `build()` 当场报错。
 - 接线复用 Part 3 的 `node_ins`/`node_outs` 汇聚 + 位置化逻辑——内部连接只是往这两张表里多塞几条 channel 端，**后续装配一行不改**。
 - **`Transform`/`NoopConsumer`** 走 `recv_any`/`send_any`，搬运封箱消息而不拆封，是「类型无关数据流」的样板，也是 Ch1.3 类型擦除设计的兑现。
 - 诚实记账：`NoopProducer`（零输入自终止）与 `bcast`（数组端口扇出）被有意推迟，各有其独立的地基要先造。
 
 下一章 Ch4.2 造那块地基——**数组端口**，然后 `Bcast` 扇出、`Merge` 扇入就水到渠成。
+
+
+### 多下游普通消息验收
+
+`shared_internal_connection_distributes_without_broadcasting` 建立 source → left/right
+竞争接收 → 共同输出的图，所有通道容量为 1。生产和消费并发，输入 200 个唯一序号，
+输出排序后必须恰好等于完整输入集合；然后验证输出关闭和图任务退出。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test connections_e2e --locked
+```
+
+这证明静态内部连接的普通消息竞争接收，不证明 flush 轮次、共享子图实例或动态寻址。
+对外输入多目标另有 graph_input_multiple_targets_share_one_queue 测试，验证 100 条输入只产生 100 条汇聚输出。
+
+
+### 对外输入连接到多个目标
+
+原版 config/mod.rs 把 inputs 中的 conn 也交给 translate_conn，并按输入名字保存为
+一条连接。因此多个目标共享队列，不能偷偷为每个目标建立独立队列并复制数据。
+当前装配为同一个输入 Sender 创建多个 Receiver 克隆，接到各目标；空目标列表在
+build 时返回 BadConnection。
+
+例如 `ports=["left:inp", "right:inp"]` 表示竞争分配。两路共同输出之后，消息总数
+应等于输入总数；如果需要两路各得到全部输入，请使用 Bcast。具体分配比例不保证。

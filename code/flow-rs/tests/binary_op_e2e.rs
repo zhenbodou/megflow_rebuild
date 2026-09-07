@@ -45,7 +45,7 @@ async fn binary_op_end_to_end_via_graph() {
 
     let a = g.input("a").unwrap();
     let b = g.input("b").unwrap();
-    let mut c = g.take_output("c").unwrap();
+    let c = g.take_output("c").unwrap();
 
     a.send(Envelope::new(1i32)).await.unwrap();
     b.send(Envelope::new(2i32)).await.unwrap();
@@ -96,7 +96,7 @@ async fn all_operations_preserve_left_envelope_metadata() {
             let mut g = Builder::default().template(template).build().unwrap();
             let a = g.input("a").unwrap();
             let b = g.input("b").unwrap();
-            let mut c = g.take_output("c").unwrap();
+            let c = g.take_output("c").unwrap();
             let handle = g.start();
             let metadata = Arc::new(String::from("left-frame"));
             let mut left = Envelope::new(7i32);

@@ -55,7 +55,7 @@ async fn build_via_registry_and_run() {
     // 故这里把单个 channel 端包成 `vec![vec![..]]`。
     let reg = find("Doubler").expect("Doubler 已注册");
     let (in_tx, in_rx) = channel(8);
-    let (out_tx, mut out_rx) = channel(8);
+    let (out_tx, out_rx) = channel(8);
     let node = (reg.ctor)(
         &flow_rs::config::Args::new(),
         vec![vec![in_rx]],

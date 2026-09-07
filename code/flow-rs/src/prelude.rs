@@ -39,7 +39,7 @@ pub use flow_derive::{
 };
 
 // ── 引擎类型与函数 ────────────────────────────────────────────────────────
-pub use crate::channel::{channel, Receiver, Sender};
+pub use crate::channel::{channel, BatchRecvError, Receiver, ReceiverT, Sender, SenderT};
 pub use crate::config::Args; // 资源作者写 `BuildResource::build(args: &Args)` 时要命名它。
 pub use crate::context::Context;
 pub use crate::error::{Error, Result};

@@ -21,7 +21,7 @@ license = "Apache-2.0"
 # 独立工作区，即使导出到另一个 workspace 内也不会隐式继承它。
 [workspace]
 ''')
-for directory in ('src', 'tests'):
+for directory in ('src', 'tests', 'examples'):
     shutil.copytree(source / directory, destination / directory)
 print(f'消息层检查点已导出到 {destination}')
 print('在该目录执行 cargo test --offline；无需下载依赖。')

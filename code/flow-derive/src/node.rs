@@ -70,12 +70,16 @@ enum PortKind {
     Input,
     InputArray,
     Output,
+    TypedOutput,
     OutputArray,
 }
 
 fn port_kind(ty: &Type) -> Option<PortKind> {
-    if type_is(ty, "Receiver") {
+    if type_is(ty, "Receiver") || wrapped_type(ty, "ReceiverT").is_some() {
         return Some(PortKind::Input);
+    }
+    if wrapped_type(ty, "SenderT").is_some() {
+        return Some(PortKind::TypedOutput);
     }
     if wrapped_type(ty, "Option").is_some_and(|inner| type_is(inner, "Sender")) {
         return Some(PortKind::Output);
@@ -100,11 +104,30 @@ pub struct PortSpec {
     pub name: Ident,
     /// 是否数组端口（名字后带 `[]`）。
     pub array: bool,
+    pub payload: Option<Type>,
 }
 
 impl Parse for PortSpec {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name: Ident = input.parse()?;
+        if input.peek(Token![:]) {
+            input.parse::<Token![:]>()?;
+            let payload: Type = input.parse()?;
+            if matches!(
+                payload,
+                Type::Slice(_) | Type::Array(_) | Type::TraitObject(_)
+            ) {
+                return Err(syn::Error::new_spanned(
+                    payload,
+                    "当前类型化端口仅支持标量，数组/动态端口协议待补齐",
+                ));
+            }
+            return Ok(PortSpec {
+                name,
+                array: false,
+                payload: Some(payload),
+            });
+        }
         // 名字后可选 `[]` → 标记为数组端口；非空括号是误用，不能静默忽略。
         let array = input.peek(syn::token::Bracket);
         if array {
@@ -114,7 +137,11 @@ impl Parse for PortSpec {
                 return Err(content.error("数组端口请写 name[]，方括号内不能指定长度或类型"));
             }
         }
-        Ok(PortSpec { name, array })
+        Ok(PortSpec {
+            name,
+            array,
+            payload: None,
+        })
     }
 }
 
@@ -147,7 +174,9 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
         }
         for spec in specs {
             // 数组端口 → Vec<Receiver>（一名多端，扇入）；标量端口 → 单个 Receiver。
-            let ty: Type = if spec.array {
+            let ty: Type = if let Some(payload) = &spec.payload {
+                parse_quote!(flow_rs::channel::ReceiverT<#payload>)
+            } else if spec.array {
                 parse_quote!(Vec<Receiver>)
             } else {
                 parse_quote!(Receiver)
@@ -198,7 +227,9 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
         }
         for spec in specs {
             // 数组端口 → Vec<Sender>（一名多端，扇出）；标量端口 → Option<Sender>。
-            let ty: Type = if spec.array {
+            let ty: Type = if let Some(payload) = &spec.payload {
+                parse_quote!(flow_rs::channel::SenderT<#payload>)
+            } else if spec.array {
                 parse_quote!(Vec<Sender>)
             } else {
                 parse_quote!(Option<Sender>)
@@ -212,7 +243,7 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
 /// 收集输出端口字段：`(字段名, 是否数组端口)`。用 port_kind 精确识别
 /// Vec<Sender> 与 Option<Sender>，避免把业务类型 HistorySender 当成端口。
 /// `close()` 据此选择「置 `None`」还是「清空 `Vec`」。
-fn output_fields(input: &DeriveInput) -> Vec<(Ident, bool)> {
+fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
     let mut outs = Vec::new();
     if let Data::Struct(data) = &input.data {
         for f in data.fields.iter() {
@@ -224,8 +255,9 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, bool)> {
                     continue;
                 }
                 match port_kind(&f.ty) {
-                    Some(PortKind::Output) => outs.push((id.clone(), false)),
-                    Some(PortKind::OutputArray) => outs.push((id.clone(), true)),
+                    Some(PortKind::Output) => outs.push((id.clone(), PortKind::Output)),
+                    Some(PortKind::TypedOutput) => outs.push((id.clone(), PortKind::TypedOutput)),
+                    Some(PortKind::OutputArray) => outs.push((id.clone(), PortKind::OutputArray)),
                     _ => {}
                 }
             }
@@ -244,8 +276,10 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, bool)> {
 pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
-    let closes = output_fields(input).into_iter().map(|(id, is_array)| {
-        if is_array {
+    let closes = output_fields(input).into_iter().map(|(id, kind)| {
+        if kind == PortKind::TypedOutput {
+            quote! { self.#id = Default::default(); }
+        } else if kind == PortKind::OutputArray {
             quote! { self.#id.clear(); } // 数组输出：清空 Vec → drop 掉每个 Sender
         } else {
             quote! { self.#id = None; } // 标量输出：置 None → drop 掉 Sender
@@ -404,12 +438,14 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 quote! { Default::default() }
             } else if matches!(
                 port_kind(&f.ty),
-                Some(PortKind::Output | PortKind::OutputArray)
+                Some(PortKind::Output | PortKind::TypedOutput | PortKind::OutputArray)
             ) {
                 let is_array = port_kind(&f.ty) == Some(PortKind::OutputArray);
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
-                if is_array {
+                if port_kind(&f.ty) == Some(PortKind::TypedOutput) {
+                    quote! { outs.remove(0).remove(0).into() }
+                } else if is_array {
                     quote! { outs.remove(0) } // 数组输出：整组 Vec<Sender> 搬走
                 } else {
                     quote! { Some(outs.remove(0).remove(0)) } // 标量：取组里唯一的 Sender
@@ -424,7 +460,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 if is_array {
                     quote! { ins.remove(0) } // 数组输入：整组 Vec<Receiver> 搬走
                 } else {
-                    quote! { ins.remove(0).remove(0) } // 标量：取组里唯一的 Receiver
+                    quote! { ins.remove(0).remove(0).into() } // 标量：取组里唯一的 Receiver
                 }
             } else if *id == "input_closed" {
                 quote! { false }
@@ -528,6 +564,7 @@ mod tests {
         PortSpec {
             name: id(s),
             array: false,
+            payload: None,
         }
     }
 
@@ -536,6 +573,7 @@ mod tests {
         PortSpec {
             name: id(s),
             array: true,
+            payload: None,
         }
     }
 

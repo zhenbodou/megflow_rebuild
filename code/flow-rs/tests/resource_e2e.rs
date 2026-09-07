@@ -57,8 +57,8 @@ async fn resource_shared_across_two_nodes() {
     let handle = g.start();
 
     let tx = g.input("in").unwrap();
-    let mut o1 = g.take_output("o1").unwrap();
-    let mut o2 = g.take_output("o2").unwrap();
+    let o1 = g.take_output("o1").unwrap();
+    let o2 = g.take_output("o2").unwrap();
 
     for v in [1i32, 2, 3] {
         tx.send(Envelope::new(v)).await.unwrap();

@@ -39,7 +39,7 @@ impl Doubler {
 #[tokio::test]
 async fn macro_doubler_pipes_and_shuts_down() {
     let (in_tx, in_rx) = channel(8);
-    let (out_tx, mut out_rx) = channel(8);
+    let (out_tx, out_rx) = channel(8);
     // 端口字段由宏注入，构造时直接填入（同模块可见）。图装配自动接线留到 Part 3。
     let node = Box::new(Doubler {
         inp: in_rx,
@@ -65,7 +65,7 @@ async fn macro_doubler_pipes_and_shuts_down() {
 async fn macro_doubler_runs_behind_boxed_dyn_actor() {
     // 生成的 Actor::start 依旧非 async → 对象安全 → 可 Box<dyn Actor>。
     let (in_tx, in_rx) = channel(4);
-    let (out_tx, mut out_rx) = channel(4);
+    let (out_tx, out_rx) = channel(4);
     let actor: Box<dyn Actor> = Box::new(Doubler {
         inp: in_rx,
         out: Some(out_tx),
@@ -114,7 +114,7 @@ impl Failing {
 async fn actor_error_closes_outputs_and_finalizes_once() {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (out, mut receiver) = channel(1);
+        let (out, receiver) = channel(1);
         let actor = Box::new(Failing {
             events: events.clone(),
             out: Some(out),

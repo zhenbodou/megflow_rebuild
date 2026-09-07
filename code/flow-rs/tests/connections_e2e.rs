@@ -43,7 +43,7 @@ async fn internal_connection_chains_two_nodes() {
     let a1 = g.input("a1").unwrap();
     let b1 = g.input("b1").unwrap();
     let b2 = g.input("b2").unwrap();
-    let mut out = g.take_output("out").unwrap();
+    let out = g.take_output("out").unwrap();
 
     a1.send(Envelope::new(1i32)).await.unwrap();
     b1.send(Envelope::new(2i32)).await.unwrap(); // add1: 1 + 2 = 3
@@ -62,10 +62,9 @@ async fn internal_connection_chains_two_nodes() {
 // 这三条都不是 `#[tokio::test]`——它们在 `build()` 就返回 `Err`，根本跑不到运行时。
 // 这正是「校验前移到 build()」：接线错误在建图那一刻暴露，而非等节点跑起来才 panic。
 
-/// 一条连接挂了两个**输入**端口（两个接收端、零发送端）：mpsc 单消费者不允许，
-/// 且没有发送端这条 channel 也永远收不到数据 → `BadConnection`。
+/// 一条连接只有输入端口，没有发送端 → BadConnection。多个接收端本身是合法的。
 #[test]
-fn connection_with_two_receivers_is_rejected() {
+fn connection_with_no_sender_is_rejected() {
     let toml = r#"
 main = "g"
 [[graphs]]
@@ -125,4 +124,67 @@ connections = [
         matches!(err, Error::PortAlreadyConnected { .. }),
         "got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn shared_internal_connection_distributes_without_broadcasting() {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let config = r#"
+main = "g"
+[[graphs]]
+name = "g"
+nodes = [{name="source", ty="Transform"}, {name="left", ty="Transform"}, {name="right", ty="Transform"}]
+inputs = [{name="inp", cap=1, ports=["source:inp"]}]
+outputs = [{name="out", cap=1, ports=["left:out", "right:out"]}]
+connections = [{cap=1, ports=["source:out", "left:inp", "right:inp"]}]
+"#;
+        let mut graph = Builder::default().template(config).build().unwrap();
+        let input = graph.input("inp").unwrap();
+        let output = graph.take_output("out").unwrap();
+        let handle = graph.start();
+        graph.stop();
+        let producer = tokio::spawn(async move {
+            for i in 0..200u32 { input.send(Envelope::new(i)).await.unwrap(); }
+        });
+        let mut received = Vec::new();
+        while let Ok(mut message) = output.recv::<u32>().await { received.push(message.unpack()); }
+        received.sort_unstable();
+        assert_eq!(received, (0..200).collect::<Vec<_>>());
+        producer.await.unwrap();
+        handle.await.unwrap().unwrap();
+    }).await.expect("竞争接收与汇聚应完整排空并收尾");
+}
+
+#[tokio::test]
+async fn graph_input_multiple_targets_share_one_queue() {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let config = r#"
+main = "g"
+[[graphs]]
+name = "g"
+nodes = [{name="left", ty="Transform"}, {name="right", ty="Transform"}]
+inputs = [{name="inp", cap=1, ports=["left:inp", "right:inp"]}]
+outputs = [{name="out", cap=1, ports=["left:out", "right:out"]}]
+"#;
+        let mut graph = Builder::default().template(config).build().unwrap();
+        let input = graph.input("inp").unwrap();
+        let output = graph.take_output("out").unwrap();
+        let handle = graph.start();
+        graph.stop();
+        let feeder = tokio::spawn(async move {
+            for value in 0..100u32 {
+                input.send(Envelope::new(value)).await.unwrap();
+            }
+        });
+        let mut values = Vec::new();
+        while let Ok(mut message) = output.recv::<u32>().await {
+            values.push(message.unpack());
+        }
+        values.sort_unstable();
+        assert_eq!(values, (0..100).collect::<Vec<_>>());
+        feeder.await.unwrap();
+        handle.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
 }

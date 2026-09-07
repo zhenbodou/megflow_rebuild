@@ -184,7 +184,7 @@ async fn graph_preserves_full_metadata_and_shares_extra_data() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut graph = Builder::default().template(REORDER_GRAPH).build().unwrap();
         let input = graph.input("inp").unwrap();
-        let mut output = graph.take_output("out").unwrap();
+        let output = graph.take_output("out").unwrap();
         let handle = graph.start();
         let extra = Arc::new(String::from("shared-frame-context"));
         let source_extra = extra.clone();
@@ -262,7 +262,7 @@ async fn emits_contiguous_prefix_before_input_closes() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut graph = Builder::default().template(REORDER_GRAPH).build().unwrap();
         let input = graph.input("inp").unwrap();
-        let mut output = graph.take_output("out").unwrap();
+        let output = graph.take_output("out").unwrap();
         let handle = graph.start();
         input.send(message(0, "zero")).await.unwrap();
         assert_eq!(output.recv::<String>().await.unwrap().unpack(), "zero");

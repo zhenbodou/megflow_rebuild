@@ -98,7 +98,7 @@ Serde 的 `Deserialize` 与同名 derive 分属类型/宏命名空间；
 
 | 原版宏 | 原版源码模块 | 当前重写状态及必须补齐的内容 |
 | --- | --- | --- |
-| inputs / outputs | ports、lib | 部分：标量/数组教学语法；类型化、字典、动态端口与信息表待补 |
+| inputs / outputs | ports、lib | 部分：普通标量/数组及具体类型标量；类型化数组、字典、动态端口与信息表待补 |
 | Node derive | node | 部分：关闭与标志；动态接线、状态、空消息转发和统计待补 |
 | Actor derive（含 local） | actor | 部分：spawn 与普通错误收尾；local、性能统计及空信号协议待补 |
 | Parser derive | internal | 未实现原版内部声明解析派生 |
@@ -133,3 +133,36 @@ Serde 的 `Deserialize` 与同名 derive 分属类型/宏命名空间；
 ---
 
 [课程首页](00-roadmap.md) · [上一课](09-maintenance.md)
+
+## 标量类型化端口：把解析器接到实际节点
+
+当前已支持原版风格 `#[inputs(inp: u32)]` 和 `#[outputs(out: String)]`。
+新增语法不是只让 syn “读懂冒号”，还需要贯通四处代码：
+
+1. PortSpec 在名字后遇到冒号时解析 syn::Type，保存 payload；无冒号保留既有语法。
+2. 输入属性生成 `ReceiverT<payload>`，输出属性生成 `SenderT<payload>`。
+3. BuildFromPorts 将图提供的未类型化端点通过 into 转成指定类型，不从 TOML 读取端口字段。
+4. Node::close 用 Default 替换类型化输出，释放已接线发送端。旧的 `Option<Sender>`
+   输出仍置 None；数组输出仍 clear，三者不能套同一种赋值。
+
+第 6 课的泛型约束和第 7 课的 AST 分类在这里实际用到：必须识别 SenderT 的泛型类型
+结构，不能按名称包含 Sender 就把业务字段当端口。当前识别仍不解析类型别名，依赖改名
+也仍需后续处理。
+
+完整下游节点及测试：
+
+```rust,ignore
+{{#include ../../../code/flow-rs/tests/typed_node.rs}}
+```
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_node --locked
+```
+
+注意 exec 直接调用 `self.out.send(...)`，不再写 Option 的 as_ref；recv 的类型来自
+字段，不再写 `recv::<u32>()`。载荷改变使用 repack，保留 partial_id。测试在 start 后
+检查确切输出和元信息，并设置超时，防止 close 漏掉类型化输出导致永不收尾。
+
+这只是具体 Rust 类型的标量端口。原版 T0 模板变量、`name:[T]` 数组、字典与 dyn
+端口的信息表和生命周期尚未完整移植。当前对数组/动态形式明确报未支持诊断，不把
+它们误认为标量载荷。旧 `name[]` 教学数组语法暂时保留。

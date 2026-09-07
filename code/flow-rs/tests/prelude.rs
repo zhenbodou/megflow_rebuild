@@ -93,7 +93,7 @@ async fn prelude_only_imports_suffice_end_to_end() {
     let mut g = Builder::default().template(PRELUDE_GRAPH).build().unwrap();
     let handle = g.start();
     let tx = g.input("in").unwrap();
-    let mut out = g.take_output("out").unwrap();
+    let out = g.take_output("out").unwrap();
 
     for v in [10i32, 20, 30] {
         tx.send(Envelope::new(v)).await.unwrap();

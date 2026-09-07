@@ -54,8 +54,8 @@ async fn bcast_fans_out_to_two_downstreams() {
     let handle = g.start();
 
     let tx = g.input("in").unwrap();
-    let mut o1 = g.take_output("o1").unwrap();
-    let mut o2 = g.take_output("o2").unwrap();
+    let o1 = g.take_output("o1").unwrap();
+    let o2 = g.take_output("o2").unwrap();
 
     for v in [1i32, 2, 3] {
         tx.send(Envelope::new(v)).await.unwrap();
@@ -108,7 +108,7 @@ async fn merge_fans_in_from_two_upstreams() {
 
     let in1 = g.input("in1").unwrap();
     let in2 = g.input("in2").unwrap();
-    let mut out = g.take_output("out").unwrap();
+    let out = g.take_output("out").unwrap();
 
     for v in [1i32, 2, 3] {
         in1.send(Envelope::new(v)).await.unwrap();

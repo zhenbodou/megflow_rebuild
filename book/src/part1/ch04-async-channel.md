@@ -146,7 +146,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 ### 5.2 `channel`：tokio mpsc 的薄封装
 
-`code/flow-rs/src/channel.rs`——发送端可 `Clone`（多生产者扇入），接收端 `recv` 取 `&mut self`（单消费者）：
+先实现下面这个单消费者教学阶段，再按本章后面的容量、批量、限时和多消费者小节扩展。最终 `code/flow-rs/src/channel.rs` 已支持接收端 Clone 与 `&self` 接收；不要把这里的中间代码覆盖到最终版本：
 
 ```rust,ignore
 use crate::error::{Error, Result};
@@ -221,23 +221,19 @@ test result: ok. 5 passed; 0 failed
 
 ## 6. 几个设计决断
 
-**为什么是 MPSC（多生产者单消费者）？** 一条通道就是引擎里的一条**边**。多个上游发往同一下游（**扇入**）很常见，所以 `Sender` 可 `Clone`；而一条边的**下游只有一个**消费者，所以 `Receiver` 单持有、`recv` 取 `&mut self`——这正好是 tokio `mpsc` 的形状，天然契合。
+第一版用 Tokio MPSC 学习所有权和异步等待，但原版要求多消费者，不能以简化为理由删除。
+本章后续通过共享接收端补上竞争接收。广播则不同：每个下游都得到一份消息，
+需要 Bcast 节点显式克隆；竞争接收只把每条消息交给其中一个消费者。
 
-**那广播（一份发多路）和 demux（多消费者抢单）呢？** 不在这一层。**广播**是 Ch4.1 `bcast` **节点**的职责：它持有多个输出端口，对每个下游 `clone` 一份消息分别 `send`——是节点层用「多条 mpsc 边」拼出来的，通道本身不需要多消费者。**demux/work-stealing** 留到 Ch4.2。把通道保持成「一条极简的管子」，复杂语义交给节点组合——这比原版把 stats / storage / 容量策略 / 广播全塞进 `channel/` 要清爽得多。
+原版 Demux 使用地址路由，不能将它等同于任意消费者抢单。后续迁移要结合 to_addr、
+端口映射与原版节点实现验证，不应仅因名字像“分流”就自行设计另一种行为。
 
-**错误为什么只有两种？** 通道层能出的错，本质只有「对端没了」（`ChannelClosed`）和「类型认领失败」（`TypeMismatch`）。不臆造更多变体。
+## 7. 对照原版后的剩余边界
 
-## 7. 逐条对比：相对原版的化简
-
-| 维度 | 原版 flow-rs `channel/` | 本书重写 | 为什么 |
-|---|---|---|---|
-| 底层 | 有栈协程感知的自制通道（`inner`/`storage`） | `tokio::sync::mpsc` 薄封装 | 少写 unsafe 与自维护调度，接主流生态 |
-| 文件量 | 6 文件、~50KB（含 stats/storage） | 1 个 `channel.rs`、~百行 | 只做「异步收发信封」这一件事 |
-| 广播/demux | 揉在通道层 | 上移到节点层（Ch4.1/4.2） | 通道极简，语义靠节点组合 |
-| 错误 | `anyhow` + 多处自定义 | `thiserror` 两变体，按需生长 | 类型化、可 `match`、无死代码 |
-| 运行时 | 自制 `rt/spawn_pinned` | tokio `spawn` / `#[tokio::main]` | 主流、久经考验 |
-
-同样，每条化简都对齐「学 Rust / 更少 bug / 功能一致」，且有 5 个测试兜底。真实代码见 `code/flow-rs/src/{channel,error}.rs`。
+当前代码支持普通消息的有界/无界队列、共享接收、限时和批量接收。
+原版还包含 flush epoch、类型转换表、ChannelStorage、统计与运行时协作。
+这些仍需要继续迁移。当前错误模型也不等同于原版，尤其不能把所有接收错误都解释为
+永久关闭。真实代码见 `code/flow-rs/src/channel.rs` 与 `error.rs`，测试范围见各小节。
 
 ## 小结 · Part 1 收官
 
@@ -277,7 +273,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test unbounded_channel -
 
 ### 还不能把这一层称为完整原版通道
 
-原版 Receiver 可克隆并由多个消费者竞争接收；当前仍是 MPSC。原版 sender.rs
+原版 Receiver 可克隆并由多个消费者竞争接收；当前已补普通消息的共享接收，见本章末尾。原版 sender.rs
 还对 DummyEnvelope 按发送端 epoch 做汇合：同一轮参与发送端的信号收齐后才向队列
 发送一个信号。receiver.rs 则把 flush 事件转成接收错误，由上层生命周期协议处理。
 这与普通 `Envelope::<T>::empty()` 不同，不能简单用“载荷为空”判断 flush。
@@ -362,3 +358,128 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test timed_receive --loc
 
 原版 flush 也能令本次接收返回错误，但通道不一定永久关闭。当前 flush 尚未接入，
 上述关闭判断仅描述已经实现的普通消息路径。
+
+
+## 多消费者：克隆的是队列入口，不是消息
+
+原版 Receiver::clone 共享底层队列，每个消费者调用 recv 都会取走一条消息。
+本书现在使用 `Arc<tokio::sync::Mutex<RecvImpl>>` 包装底层 Tokio 接收端：Arc 让多个
+Receiver 指向同一队列；Mutex 确保同一时刻只有一个任务修改队列的接收状态。
+Receiver 因此可以实现 Clone，recv 系列方法改为接收 `&self`。
+
+接收流程是：异步等待获得锁 → 等待底层消息 → 取出消息 → 释放锁 → 返回信封。
+锁只保护队列操作，不保护业务处理；收到消息后各消费者可以并行计算。与原版底层
+实现相比，这个版本串行化了接收等待，不宣称吞吐量或任务调度次序相同。
+
+不要改用 std::sync::Mutex 并跨 await 持有普通锁，否则等待消息的任务可能占住执行
+线程，阻止其他任务推进。这里的异步锁允许等待期间让出执行机会。
+
+克隆接收端不克隆载荷。4 个消费者处理 1000 条输入，总共应当得到 1000 条，不是
+4000 条；也不要求每个消费者恰好得到 250 条。调度和处理速度可以影响分配。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test competing_receivers --locked
+```
+
+测试覆盖容量 0、1、16 下 4 个消费者竞争 1000 条消息，核对完整集合、数量和退出；
+还检查释放一个 Receiver 后其他克隆仍可接收，最后一个释放后发送端观察到关闭。
+取消测试先将 recv Future 显式 poll 到 Pending，再取消，证明它释放了已持有的锁，
+后续消费者没有永久卡住。只创建 Future 然后立即 drop 无法证明实际等待的取消行为。
+
+限时接收的计时包括等待这把锁的时间。批量接收每次只锁定一条消息的接收，因此不同
+消费者的批次可以交错取得消息，不能把 batch_recv 当成对队列的事务锁。
+
+图装配已支持内部连接多下游竞争接收；对外输入也支持多目标竞争接收；共享子图仍需独立对齐。
+原版每个接收者还维护 flush 轮次；本次共享的是普通消息队列，尚未补齐这一控制协议。
+
+### 用原版算法做独立对照
+
+仅用自己写的期待值测试，可能把对原版的误解同时写进实现和测试。因此
+`tests/reference/batch_recv_any.rs` 保留了指定原版提交中 batch_recv_any 的方法原文
+和许可证。外围测试适配器提供队列接收与同一 Tokio 时间源，没有改写方法内的权重逻辑。
+
+`weighted_batches_match_original_method_exhaustively` 为 6 条消息分别选择 None、
+Some(0)、Some(3)，形成 729 种序列；每种使用 0 至 7 的 8 个阈值，共 5,832 次对照。
+每次检查成功/关闭类别、载荷、权重和队列剩余数量。这样不仅检查“输出看起来正确”，
+也检查阈值达到后是否多消费了一条消息。
+
+对照队列预先装好数据并关闭，避免把并发调度的偶然顺序当成固定答案。限时行为仍由
+前面的独立测试验证。这层证据不覆盖原版通道的 flush、多消费者轮次或统计；适配器
+只隔离验证批量算法，不能宣称已经运行完整原版运行时。
+
+## 类型化端点：把类型写在端口上
+
+前面每次接收都写 `receiver.recv::<u32>()`。原版还提供 `ReceiverT<T>`、`SenderT<T>`，
+让端口本身固定类型。例如：
+
+```rust,ignore
+let (sender, receiver) = channel(0);
+let sender: SenderT<u32> = sender.into();
+let receiver: ReceiverT<u32> = receiver.into();
+sender.send(Envelope::new(7)).await.unwrap();
+let mut envelope = receiver.recv().await.unwrap();
+assert_eq!(envelope.unpack(), 7);
+```
+
+变量上的 u32 决定 send/recv 的载荷类型。这是类型推导，不是宏替你补字符串。
+当前完整包装实现如下：
+
+```rust,ignore
+{{#include ../../../code/flow-rs/src/channel/typed.rs}}
+```
+
+按三层理解：
+
+1. 元组结构体保存原 Sender/Receiver 与 `PhantomData<T>`。PhantomData 不存储真实载荷，
+   但告诉编译器此包装与 T 有类型关系，参与 trait 和自动 Send/Sync 的检查。
+2. From 接收原端点的所有权，into 根据目标变量类型选择 From 实现。它不新建通道，
+   不复制队列，也不读取队列中的消息。
+3. 固有 send/recv 方法固定 T；Deref 则让包装继续使用底层 send_any/recv_any 等接口。
+   因此它不是禁止所有异类型输入的封闭容器。未类型化发送仍可能把其他类型送入队列。
+
+类型化 recv 沿用原版下转型失败 panic 的行为。它不等于当前未类型化 `recv::<T>` 的
+TypeMismatch 返回；这处错误模型差异仍应在完整 API 对照中跟踪。批量和限时接口
+复用前面实现，不重复编写权重循环或计时逻辑。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_endpoints --locked
+```
+
+三个测试验证类型推导、限时与部分批次、克隆后的共享队列、通过 Deref 调用未类型化
+操作，以及错误载荷的失败行为。
+
+原版 From 还查询 CVT_VTABLE，以端口类型和通道类型查找转换函数。当前尚未实现
+该转换表，尚未提供原版 TypeInfo；默认未接线端点见下一节。因此这些包装只是
+类型化端口宏的基础，不能把 From 可用说成跨类型转换已完成。
+
+练习：为什么 `SenderT<u32>` 能调用 send_any？方法查找可通过 Deref 找到 Sender 的
+方法；要设计严格禁止绕过类型检查的独立 API，应慎重决定是否提供 Deref，但这里
+迁移的是原版公开接口，不能擅自删去这一能力。
+
+## 默认未接线端点：Default 不等于新建通道
+
+原版 Sender/Receiver 支持 Default，节点可以先默认构造字段，再由图装配接线。
+默认端点没有实际队列。当前 Sender 使用 Unconnected 枚举分支，Receiver 使用
+Option 的 None 表示这一状态；调用 is_none() 可以与已接线后关闭区分。
+
+原版 sender.rs 的 send_any 在没有底层实现时直接返回 Ok(())。因此未接线输出的
+消息被丢弃，但发送不报错；接收端没有队列时则返回错误。这个行为不能根据直觉改成
+“只要 is_closed 为真，send 一定失败”。
+
+| 端点状态 | is_none | 发送结果 |
+| --- | --- | --- |
+| 默认未接线 Sender | true | 丢弃消息，Ok(()) |
+| 已接线，但接收者全释放 | false | Err(ChannelClosed) |
+| 已接线且接收者仍在 | false | 入队，可能等待有界容量 |
+
+SenderT/ReceiverT 的 Default 手工委托给底层端点，不构造 T，所以不需要 T: Default。
+这是泛型约束设计的一个实际例子：包装类型能默认构造，不代表它标记的载荷类型也必须
+默认构造。测试用未实现 Default 的空类型确认没有误加约束。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_endpoints --locked
+```
+
+注意：具备默认端点并不自动让 Node/Actor 宏支持所有原版节点写法；字段识别、接线、
+TypeInfo 和生命周期仍需一起迁移。当前图装配仍校验必需端口，不会因为 Default 存在
+就自动忽略缺少接线的配置错误。

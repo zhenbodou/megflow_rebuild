@@ -1,34 +1,34 @@
 //! flow-rs · channel —— 承载 `SealedEnvelope` 的异步通道（重写版）。
 //!
-//! 用 `tokio::sync::mpsc` 薄封装：**多生产者、单消费者**。`Sender` 可 `Clone`
-//! （扇入：多个上游发往同一下游），`Receiver::recv` 取 `&mut self`（单消费者）。
-//! 这是引擎最基础的一条「边」。**广播**（一份消息发给多路，Ch4.1 的 `bcast`）
-//! 与 **work-stealing demux**（Ch4.2）都是**节点级/后续**话题——不塞进这一层，
-//! 保持通道本身极简。这正是相对原版重型 `channel/`（stats/storage/协程感知）
-//! 的化简：把「一条能异步收发信封的管子」做到最小。
-//!
-//! Thin wrapper over `tokio::sync::mpsc` (MPSC). Broadcast and demux are
-//! node-level / later concerns, kept out of this layer.
+//! 基于 Tokio 队列，共享接收端用异步 Mutex 串行取出消息。
+//! Sender 与 Receiver 均可克隆；多个消费者竞争消息，每条仅交给一个消费者。
+//! flush epoch、类型转换和统计协议仍需继续对齐原版。
+
+mod typed;
+pub use typed::{ReceiverT, SenderT};
 
 use crate::error::{Error, Result};
 use flow_message::{Envelope, SealedEnvelope};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
 /// 通道发送端。可 `Clone`（多生产者扇入）。
 /// Sending half; `Clone` for multi-producer fan-in.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Sender {
     inner: SendImpl,
 }
 
-/// 通道接收端。单消费者：`recv` 取 `&mut self`。
-/// Receiving half; single-consumer (`recv` takes `&mut self`).
+/// 克隆共享同一队列，竞争接收，不复制消息。
+#[derive(Clone, Default)]
 pub struct Receiver {
-    inner: RecvImpl,
+    inner: Option<Arc<Mutex<RecvImpl>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 enum SendImpl {
+    #[default]
+    Unconnected,
     Bounded(mpsc::Sender<SealedEnvelope>),
     Unbounded(mpsc::UnboundedSender<SealedEnvelope>),
 }
@@ -46,7 +46,7 @@ pub fn channel(capacity: usize) -> (Sender, Receiver) {
                 inner: SendImpl::Unbounded(tx),
             },
             Receiver {
-                inner: RecvImpl::Unbounded(rx),
+                inner: Some(Arc::new(Mutex::new(RecvImpl::Unbounded(rx)))),
             },
         )
     } else {
@@ -56,17 +56,23 @@ pub fn channel(capacity: usize) -> (Sender, Receiver) {
                 inner: SendImpl::Bounded(tx),
             },
             Receiver {
-                inner: RecvImpl::Bounded(rx),
+                inner: Some(Arc::new(Mutex::new(RecvImpl::Bounded(rx)))),
             },
         )
     }
 }
 
 impl Sender {
+    /// 默认端点尚未接到队列；与已接线后关闭不同。
+    pub fn is_none(&self) -> bool {
+        matches!(self.inner, SendImpl::Unconnected)
+    }
+
     /// 发送一个已封箱的信封（未类型化）。通道关闭 → `Err(ChannelClosed)`。
     /// Send an already-sealed envelope (untyped).
     pub async fn send_any(&self, msg: SealedEnvelope) -> Result<()> {
         match &self.inner {
+            SendImpl::Unconnected => Ok(()),
             SendImpl::Bounded(tx) => tx.send(msg).await.map_err(|_| Error::ChannelClosed),
             SendImpl::Unbounded(tx) => tx.send(msg).map_err(|_| Error::ChannelClosed),
         }
@@ -87,6 +93,7 @@ impl Sender {
     /// 通道是否已关闭（所有 `Receiver` 均已 drop）。
     pub fn is_closed(&self) -> bool {
         match &self.inner {
+            SendImpl::Unconnected => true,
             SendImpl::Bounded(tx) => tx.is_closed(),
             SendImpl::Unbounded(tx) => tx.is_closed(),
         }
@@ -104,12 +111,13 @@ impl<T> std::fmt::Debug for BatchRecvError<T> {
 }
 
 impl Receiver {
+    pub fn is_none(&self) -> bool {
+        self.inner.is_none()
+    }
+
     // ANCHOR: timed_receive
     /// 原版 try_recv 是限时等待；超时为 Ok(None)，关闭为 Err。
-    pub async fn try_recv_any(
-        &mut self,
-        dur: std::time::Duration,
-    ) -> Result<Option<SealedEnvelope>> {
+    pub async fn try_recv_any(&self, dur: std::time::Duration) -> Result<Option<SealedEnvelope>> {
         tokio::select! {
             _ = tokio::time::sleep(dur) => Ok(None),
             message = self.recv_any() => message.map(Some),
@@ -117,7 +125,7 @@ impl Receiver {
     }
 
     pub async fn try_recv<T: Send + Clone + 'static>(
-        &mut self,
+        &self,
         dur: std::time::Duration,
     ) -> Result<Option<Envelope<T>>> {
         self.try_recv_any(dur).await.map(|item| {
@@ -133,7 +141,7 @@ impl Receiver {
     // ANCHOR: batch_receive
     /// n 是累计权重阈值，不是信封数量。超时返回部分成功结果。
     pub async fn batch_recv_any(
-        &mut self,
+        &self,
         n: usize,
         dur: std::time::Duration,
     ) -> std::result::Result<Vec<SealedEnvelope>, BatchRecvError<SealedEnvelope>> {
@@ -160,7 +168,7 @@ impl Receiver {
     }
 
     pub async fn batch_recv<T: Send + Clone + 'static>(
-        &mut self,
+        &self,
         n: usize,
         dur: std::time::Duration,
     ) -> std::result::Result<Vec<Envelope<T>>, BatchRecvError<Envelope<T>>> {
@@ -185,8 +193,9 @@ impl Receiver {
 
     /// 收一个已封箱的信封（未类型化）。所有 `Sender` 均 drop 且队列排空 →
     /// `Err(ChannelClosed)`。/ Receive an untyped sealed envelope.
-    pub async fn recv_any(&mut self) -> Result<SealedEnvelope> {
-        match &mut self.inner {
+    pub async fn recv_any(&self) -> Result<SealedEnvelope> {
+        let inner = self.inner.as_ref().ok_or(Error::ChannelClosed)?;
+        match &mut *inner.lock().await {
             RecvImpl::Bounded(rx) => rx.recv().await,
             RecvImpl::Unbounded(rx) => rx.recv().await,
         }
@@ -196,7 +205,7 @@ impl Receiver {
     /// 收一个类型化信封：`recv_any` 后把类型 `downcast` 回来（Ch1.3 的安全实现）。
     /// 类型不符 → `Err(TypeMismatch)`。
     /// Receive and downcast back to `Envelope<T>`; wrong type → `TypeMismatch`.
-    pub async fn recv<T>(&mut self) -> Result<Envelope<T>>
+    pub async fn recv<T>(&self) -> Result<Envelope<T>>
     where
         T: 'static + Send,
     {
@@ -218,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_send_recv_roundtrip() {
-        let (tx, mut rx) = channel(4);
+        let (tx, rx) = channel(4);
         tx.send(Envelope::new(42i32)).await.unwrap();
         let mut e = rx.recv::<i32>().await.unwrap();
         assert_eq!(e.unpack(), 42);
@@ -226,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_wrong_type_is_type_mismatch() {
-        let (tx, mut rx) = channel(4);
+        let (tx, rx) = channel(4);
         tx.send(Envelope::new(1i32)).await.unwrap();
         // 用 matches! 断言错误变体：无需 Envelope<T> 实现 Debug
         assert!(matches!(
@@ -245,14 +254,14 @@ mod tests {
 
     #[tokio::test]
     async fn recv_after_senders_dropped_is_closed() {
-        let (tx, mut rx) = channel(1);
+        let (tx, rx) = channel(1);
         drop(tx);
         assert!(matches!(rx.recv::<i32>().await, Err(Error::ChannelClosed)));
     }
 
     #[tokio::test]
     async fn untyped_send_any_recv_any() {
-        let (tx, mut rx) = channel(1);
+        let (tx, rx) = channel(1);
         tx.send_any(Envelope::new(7i32).seal()).await.unwrap();
         let mut sealed = rx.recv_any().await.unwrap();
         let e = sealed.downcast_mut::<Envelope<i32>>().unwrap();

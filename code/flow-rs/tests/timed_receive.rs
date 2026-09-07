@@ -4,7 +4,7 @@ use std::time::Duration;
 async fn timeout_does_not_close_or_consume_future_messages() {
     tokio::time::timeout(Duration::from_secs(2), async {
         for capacity in [0, 1] {
-            let (tx, mut rx) = channel(capacity);
+            let (tx, rx) = channel(capacity);
             assert!(rx
                 .try_recv::<u32>(Duration::from_millis(10))
                 .await
@@ -31,7 +31,7 @@ async fn timeout_does_not_close_or_consume_future_messages() {
 }
 #[tokio::test]
 async fn empty_payload_is_a_received_message_and_metadata_survives() {
-    let (tx, mut rx) = channel(0);
+    let (tx, rx) = channel(0);
     let mut envelope = Envelope::<u32>::empty();
     envelope.info_mut().partial_id = Some(8);
     tx.send(envelope).await.unwrap();
