@@ -26,7 +26,9 @@
 //! (but our `Result` is our own, so no `use anyhow::Result;` is needed alongside).
 
 // ── 消息 ──────────────────────────────────────────────────────────────────
-pub use flow_message::Envelope;
+pub use crate::envelope::{
+    str2addr, AnyEnvelope, DummyEnvelope, Envelope, EnvelopeInfo, SealedEnvelope,
+};
 
 // ── 过程宏（flow-derive）──────────────────────────────────────────────────
 // 派生宏 TypeName/Node/Actor/BuildFromPorts、属性宏 inputs/outputs/methods、函数式宏

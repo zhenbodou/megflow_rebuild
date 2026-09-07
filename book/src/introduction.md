@@ -26,4 +26,4 @@
 请先读 [完整重构的验收账本](part0/ch04-completeness-audit.md)，了解每项差距、
 原版源码证据和验收要求。Python 调用层可以不保留，Rust 业务能力不能随之删去。
 
-宏学习从 [Ch2.0](part2/ch00-macro-rules.md) 开始，随后逐步学习过程宏和相关 crate。
+宏学习从 [Ch2.0](macros/01-basics.md) 开始，随后逐步学习过程宏和相关 crate。

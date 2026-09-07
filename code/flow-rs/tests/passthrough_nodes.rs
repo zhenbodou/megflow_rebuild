@@ -17,7 +17,7 @@ async fn transform_passes_through_i32_stream() {
     let got = Arc::new(Mutex::new(Vec::new()));
     let sink = got.clone();
     let mut sb = Sandbox::pure("Transform").unwrap();
-    sb.add_data("inp", vec![1i32, 2, 3])
+    sb.add_items("inp", vec![1i32, 2, 3])
         .add_check("out", move |v: i32| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
     assert_eq!(*got.lock().unwrap(), vec![1, 2, 3]);
@@ -30,7 +30,7 @@ async fn transform_is_type_agnostic_over_strings() {
     let got = Arc::new(Mutex::new(Vec::new()));
     let sink = got.clone();
     let mut sb = Sandbox::pure("Transform").unwrap();
-    sb.add_data("inp", vec!["a".to_string(), "bc".to_string()])
+    sb.add_items("inp", vec!["a".to_string(), "bc".to_string()])
         .add_check("out", move |v: String| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
     assert_eq!(
@@ -44,6 +44,6 @@ async fn noop_consumer_drains_and_finishes() {
     // NoopConsumer 只有输入、没有输出：把所有消息吸收丢弃，输入耗尽后干净收工。
     // 断言点是「start() 返回 Ok 且不挂起」——一个终止数据流分支的汇（sink）。
     let mut sb = Sandbox::pure("NoopConsumer").unwrap();
-    sb.add_data("inp", vec![1i32, 2, 3, 4]);
+    sb.add_items("inp", vec![1i32, 2, 3, 4]);
     sb.start().await.unwrap();
 }

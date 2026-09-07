@@ -139,7 +139,7 @@ async fn sandbox_bcast_single_downstream() {
     let out = Arc::new(Mutex::new(Vec::new()));
     let sink = out.clone();
     let mut sb = Sandbox::pure("Bcast").unwrap();
-    sb.add_data("inp", vec![1i32, 2, 3])
+    sb.add_items("inp", vec![1i32, 2, 3])
         .add_check("out", move |v: i32| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
     assert_eq!(*out.lock().unwrap(), vec![1, 2, 3]);
@@ -151,7 +151,7 @@ async fn sandbox_merge_single_upstream() {
     let out = Arc::new(Mutex::new(Vec::new()));
     let sink = out.clone();
     let mut sb = Sandbox::pure("Merge").unwrap();
-    sb.add_data("inps", vec![7i32, 8, 9])
+    sb.add_items("inps", vec![7i32, 8, 9])
         .add_check("out", move |v: i32| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
     assert_eq!(*out.lock().unwrap(), vec![7, 8, 9]);

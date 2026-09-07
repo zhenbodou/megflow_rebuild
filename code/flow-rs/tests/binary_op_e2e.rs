@@ -67,8 +67,8 @@ async fn sandbox_runs_single_binary_op() {
     let sink = collected.clone();
 
     let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-    sb.add_data("a", vec![1i32])
-        .add_data("b", vec![2i32])
+    sb.add_items("a", vec![1i32])
+        .add_items("b", vec![2i32])
         .add_check("c", move |v: i32| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
 
@@ -81,7 +81,7 @@ async fn sandbox_surfaces_node_error() {
     // Sandbox::start 的返回值（而非静默吞掉）。
     let args: flow_rs::config::Args = toml::from_str(r#"op = "%""#).unwrap();
     let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-    sb.add_data("a", vec![1i32]).add_data("b", vec![2i32]);
+    sb.add_items("a", vec![1i32]).add_items("b", vec![2i32]);
 
     let result: Result<()> = sb.start().await;
     assert!(matches!(result, Err(Error::Arg { .. })));

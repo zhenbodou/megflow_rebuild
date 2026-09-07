@@ -103,7 +103,7 @@ async fn sandbox_tally_without_resource_forwards() {
     // Tally 有个自有参数 `res`（要借用的资源名）——沙箱里随便给个名字，反正沙箱没有资源。
     let args: flow_rs::config::Args = toml::from_str(r#"res = "missing""#).unwrap();
     let mut sb = Sandbox::with_args("Tally", args).unwrap();
-    sb.add_data("inp", vec![1i32, 2, 3])
+    sb.add_items("inp", vec![1i32, 2, 3])
         .add_check("out", move |v: i32| sink.lock().unwrap().push(v));
     sb.start().await.unwrap();
     assert_eq!(

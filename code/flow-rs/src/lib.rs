@@ -19,6 +19,7 @@ pub mod builtin;
 pub mod channel;
 pub mod config;
 pub mod context;
+pub mod envelope;
 pub mod error;
 pub mod graph;
 pub mod node;

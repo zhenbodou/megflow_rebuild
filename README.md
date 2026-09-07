@@ -26,10 +26,11 @@ cd code && cargo build --workspace && cargo test --workspace
 
 ## Rust 宏学习与验收
 
-宏学习从 [Ch2.0](book/src/part2/ch00-macro-rules.md) 开始，依次学习 Token/AST、
-三种过程宏、泛型、错误定位、trybuild 和 inventory，再回到 MegFlow 的真实宏。
+宏学习从独立的 [Rust 宏完整教程](book/src/macros/00-roadmap.md) 开始，共 10 课，
+依次学习声明宏、Token/AST、三种过程宏、泛型约束、属性组合、诊断测试和发布维护，
+最后回到 MegFlow 实战。每阶段配代码、运行命令和练习。
 独立实验位于 `code/macro-labs/`，不依赖完整引擎；分步代码可以用
-`scripts/macro_checkpoint.py` 导出（用法见 Ch2.2b）。
+`scripts/macro_checkpoint.py` 导出（用法见教程第 5 课）。
 
 在项目根目录执行：
 

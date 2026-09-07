@@ -337,3 +337,52 @@ impl Tally {
 }
 
 node_register!("Tally", Tally);
+
+// ANCHOR: reorder
+/// 按 partial_id 从 0 开始逐个转发。未来 ID 的重复消息替换缓存；旧 ID 和缺口关闭 panic。
+/// 与原版 node/reorder.rs 的常规消息语义对齐；通道 flush 协议仍需单独实现。
+#[inputs(inp)]
+#[outputs(out)]
+#[derive(Node, Actor, BuildFromPorts)]
+pub struct Reorder {
+    #[state]
+    cache: std::collections::BTreeMap<u64, flow_message::SealedEnvelope>,
+    #[state]
+    seq_id: u64,
+}
+
+#[methods]
+impl Reorder {
+    async fn exec(&mut self) -> Result<()> {
+        let message = match self.inp.recv_any().await {
+            Ok(message) => message,
+            Err(Error::ChannelClosed) => {
+                assert!(self.cache.is_empty(), "reorder closed with a sequence gap");
+                return Err(Error::ChannelClosed);
+            }
+            Err(error) => return Err(error),
+        };
+        let id = message
+            .info()
+            .partial_id
+            .expect("partial_id required by reorder");
+        assert!(
+            id >= self.seq_id,
+            "reorder received an already emitted sequence id"
+        );
+        // 原版对未来重复 ID 使用 insert：保留最后一封，而不是报错或广播两次。
+        self.cache.insert(id, message);
+        // 只取当前缺少的那个序号。队列里虽有更大的 ID，也必须等待缺口补齐。
+        while let Some(message) = self.cache.remove(&self.seq_id) {
+            self.seq_id += 1;
+            if let Some(out) = self.out.as_ref() {
+                // 原版忽略已关闭下游的发送错误，仍消费输入并推进序号。
+                out.send_any(message).await.ok();
+            }
+        }
+        Ok(())
+    }
+}
+
+node_register!("Reorder", Reorder);
+// ANCHOR_END: reorder

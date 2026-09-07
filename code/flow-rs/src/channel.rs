@@ -18,26 +18,58 @@ use tokio::sync::mpsc;
 /// Sending half; `Clone` for multi-producer fan-in.
 #[derive(Clone)]
 pub struct Sender {
-    inner: mpsc::Sender<SealedEnvelope>,
+    inner: SendImpl,
 }
 
 /// 通道接收端。单消费者：`recv` 取 `&mut self`。
 /// Receiving half; single-consumer (`recv` takes `&mut self`).
 pub struct Receiver {
-    inner: mpsc::Receiver<SealedEnvelope>,
+    inner: RecvImpl,
 }
 
-/// 建一条容量为 `capacity` 的有界通道。/ create a bounded channel.
+#[derive(Clone)]
+enum SendImpl {
+    Bounded(mpsc::Sender<SealedEnvelope>),
+    Unbounded(mpsc::UnboundedSender<SealedEnvelope>),
+}
+enum RecvImpl {
+    Bounded(mpsc::Receiver<SealedEnvelope>),
+    Unbounded(mpsc::UnboundedReceiver<SealedEnvelope>),
+}
+
+/// 与原版 ChannelStorage 一致：正容量有界，0 表示无界而非零容量会合。
 pub fn channel(capacity: usize) -> (Sender, Receiver) {
-    let (tx, rx) = mpsc::channel(capacity);
-    (Sender { inner: tx }, Receiver { inner: rx })
+    if capacity == 0 {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Sender {
+                inner: SendImpl::Unbounded(tx),
+            },
+            Receiver {
+                inner: RecvImpl::Unbounded(rx),
+            },
+        )
+    } else {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            Sender {
+                inner: SendImpl::Bounded(tx),
+            },
+            Receiver {
+                inner: RecvImpl::Bounded(rx),
+            },
+        )
+    }
 }
 
 impl Sender {
     /// 发送一个已封箱的信封（未类型化）。通道关闭 → `Err(ChannelClosed)`。
     /// Send an already-sealed envelope (untyped).
     pub async fn send_any(&self, msg: SealedEnvelope) -> Result<()> {
-        self.inner.send(msg).await.map_err(|_| Error::ChannelClosed)
+        match &self.inner {
+            SendImpl::Bounded(tx) => tx.send(msg).await.map_err(|_| Error::ChannelClosed),
+            SendImpl::Unbounded(tx) => tx.send(msg).map_err(|_| Error::ChannelClosed),
+        }
     }
 
     /// 发送一个类型化信封：内部先 `seal` 再走 `send_any`。
@@ -54,15 +86,111 @@ impl Sender {
 
     /// 通道是否已关闭（所有 `Receiver` 均已 drop）。
     pub fn is_closed(&self) -> bool {
-        self.inner.is_closed()
+        match &self.inner {
+            SendImpl::Bounded(tx) => tx.is_closed(),
+            SendImpl::Unbounded(tx) => tx.is_closed(),
+        }
+    }
+}
+
+/// 提前关闭时保留已收到的部分批次，调用者决定如何处理。
+pub enum BatchRecvError<T> {
+    Closed(Vec<T>),
+}
+impl<T> std::fmt::Debug for BatchRecvError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BatchRecvError::Closed")
     }
 }
 
 impl Receiver {
+    // ANCHOR: timed_receive
+    /// 原版 try_recv 是限时等待；超时为 Ok(None)，关闭为 Err。
+    pub async fn try_recv_any(
+        &mut self,
+        dur: std::time::Duration,
+    ) -> Result<Option<SealedEnvelope>> {
+        tokio::select! {
+            _ = tokio::time::sleep(dur) => Ok(None),
+            message = self.recv_any() => message.map(Some),
+        }
+    }
+
+    pub async fn try_recv<T: Send + Clone + 'static>(
+        &mut self,
+        dur: std::time::Duration,
+    ) -> Result<Option<Envelope<T>>> {
+        self.try_recv_any(dur).await.map(|item| {
+            item.map(|mut item| {
+                item.downcast_mut::<Envelope<T>>()
+                    .expect("type error when downcast in receiver")
+                    .take()
+            })
+        })
+    }
+    // ANCHOR_END: timed_receive
+
+    // ANCHOR: batch_receive
+    /// n 是累计权重阈值，不是信封数量。超时返回部分成功结果。
+    pub async fn batch_recv_any(
+        &mut self,
+        n: usize,
+        dur: std::time::Duration,
+    ) -> std::result::Result<Vec<SealedEnvelope>, BatchRecvError<SealedEnvelope>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let timer = tokio::time::sleep(dur);
+        tokio::pin!(timer);
+        let mut batch = Vec::with_capacity(n);
+        let mut weight = 0;
+        loop {
+            tokio::select! {
+                _ = &mut timer => return Ok(batch),
+                message = self.recv_any() => match message {
+                    Ok(message) => {
+                        weight += message.info().weight.unwrap_or(1);
+                        batch.push(message);
+                        if weight >= n { return Ok(batch); }
+                    }
+                    Err(_) => return Err(BatchRecvError::Closed(batch)),
+                }
+            }
+        }
+    }
+
+    pub async fn batch_recv<T: Send + Clone + 'static>(
+        &mut self,
+        n: usize,
+        dur: std::time::Duration,
+    ) -> std::result::Result<Vec<Envelope<T>>, BatchRecvError<Envelope<T>>> {
+        let convert = |items: Vec<SealedEnvelope>| {
+            items
+                .into_iter()
+                .map(|mut item| {
+                    item.downcast_mut::<Envelope<T>>()
+                        .expect("type error when downcast")
+                        .take()
+                })
+                .collect()
+        };
+        self.batch_recv_any(n, dur)
+            .await
+            .map(convert)
+            .map_err(|error| match error {
+                BatchRecvError::Closed(items) => BatchRecvError::Closed(convert(items)),
+            })
+    }
+    // ANCHOR_END: batch_receive
+
     /// 收一个已封箱的信封（未类型化）。所有 `Sender` 均 drop 且队列排空 →
     /// `Err(ChannelClosed)`。/ Receive an untyped sealed envelope.
     pub async fn recv_any(&mut self) -> Result<SealedEnvelope> {
-        self.inner.recv().await.ok_or(Error::ChannelClosed)
+        match &mut self.inner {
+            RecvImpl::Bounded(rx) => rx.recv().await,
+            RecvImpl::Unbounded(rx) => rx.recv().await,
+        }
+        .ok_or(Error::ChannelClosed)
     }
 
     /// 收一个类型化信封：`recv_any` 后把类型 `downcast` 回来（Ch1.3 的安全实现）。

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 flow-message = { path = "../flow-message" }
 flow-derive = { path = "../flow-derive" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 thiserror = { workspace = true }
 # 编译期节点注册表（Ch2.4）。flow-rs 同时 `pub use inventory`，好让
 # `node_register!` 生成的注册代码用 `flow_rs::inventory::submit!` 定位到本 crate 的表。

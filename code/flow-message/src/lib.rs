@@ -6,4 +6,4 @@
 
 pub mod envelope;
 
-pub use envelope::{AnyEnvelope, DummyEnvelope, Envelope, EnvelopeInfo, SealedEnvelope};
+pub use envelope::{str2addr, AnyEnvelope, DummyEnvelope, Envelope, EnvelopeInfo, SealedEnvelope};

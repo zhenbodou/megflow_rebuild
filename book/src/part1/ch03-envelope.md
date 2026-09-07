@@ -87,24 +87,40 @@ flowchart LR
 
 ## 3. 绿：`EnvelopeInfo` 与 `Envelope<M>`
 
-### 3.1 `EnvelopeInfo`——只留现在用得上的字段
+### 3.1 `EnvelopeInfo`——保留原版七项元信息
 
-原版 `EnvelopeInfo` 有 **7 个字段**（`skipped` / `weight` / `partial_id` / `from_addr` / `to_addr` / `transfer_addr` / `extra_data`），服务于重排序、寻址、转发等**还没实现**的特性。我们重写秉持 **YAGNI**（You Aren't Gonna Need It）：先只放当下真正要用的两个，其余等对应特性（Ch4.2 重排序等）落地时再按需补——**避免提前引入一堆用不上、却要一直维护的状态**。
+信封除了载荷，还携带调度和路由需要的元信息。完整重构应保留原版七个字段：
+即使当前节点不解释某个字段，也不能在转发或重打包时将它丢掉。
 
 ```rust,ignore
 use std::any::Any;
 use std::sync::Arc;
-
-#[derive(Default, Clone)]
-pub struct EnvelopeInfo {
-    /// 序号（可重复），用于重排序等场景。
-    pub partial_id: Option<u64>,
-    /// 任意类型、可跨线程共享的附带数据。
-    pub extra_data: Option<Arc<dyn Any + Send + Sync>>,
-}
+{{#include ../../../code/flow-message/src/envelope.rs:envelope_info}}
 ```
 
-`extra_data` 的类型 `Option<Arc<dyn Any + Send + Sync>>` 把前两章的原理**一次用全**：`Arc` 负责共享 + 跨线程（Ch1.1 §4），`dyn Any` 负责「类型任意 + 可安全认领」（Ch1.2 §5），`Send + Sync` 是跨任务通行证（Ch1.1 §3）。`#[derive(Default, Clone)]` 让它能作为字段默认构造、随信封一起克隆。
+Default 令 skipped 为 false，其余六项为 None。None 表示未指定，不能自动当作
+Some(0)：例如序号 0 是重排序的第一条消息，未指定序号则是协议错误。
+地址字段只储存地址，不会自动路由；skipped 也不会自动过滤消息。
+
+`extra_data` 的 `Arc<dyn Any + Send + Sync>` 允许共享任意可跨线程的数据。
+克隆信封时克隆的是 Arc 引用，两个信封仍指向同一份附带对象，不是深拷贝。
+转换载荷应使用 repack 保留整份元信息；重新 Envelope::new 会恢复默认元信息。
+
+字符串地址的转换也与原版一致：先尝试解析 u64，失败再对完整字符串做哈希。
+
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:str2addr}}
+```
+
+不要预先 trim 字符串或把哈希值当成跨版本的永久 ID。实现使用的 DefaultHasher
+没有承诺跨 Rust 版本保持同一种算法。测试应比较同一算法产生的结果。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-message --test envelope_contract --locked
+```
+
+这组测试检查默认值、所有字段的克隆/重打包/类型擦除、Arc 身份、空载荷与地址转换。
+它证明元信息存储与传递，不证明后续寻址和批处理消费者已经完整实现。
 
 ### 3.2 `Envelope<M>`——载荷为什么是 `Option<M>`
 
@@ -280,19 +296,19 @@ test envelope::tests::type_erasure_seal_then_downcast ... ok
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-**绿**。红-绿走完一轮，消息层的地基就位了。完整代码在 [`code/flow-message/src/envelope.rs`](https://github.com/) 里（本仓库 `code/flow-message/src/envelope.rs`），本章所有片段都从那里节选，逐字对应。
+**绿**。红-绿走完一轮，消息层的地基就位了。完整代码在本仓库 `code/flow-message/src/envelope.rs`。本章手写片段用于分阶段解释，最终实现以该文件与契约测试为准。
 
-> **依赖账**：这一章**没有引入任何外部依赖**——纯标准库（`std::any::Any` + `std::sync::Arc`）就够了。原版 `AnyEnvelope` 还继承了 `dyn_clone::DynClone` 来支持「克隆一个 `Box<dyn AnyEnvelope>`」；那个能力同样**只有广播（Ch4.1）才需要**，所以推迟到那时再引入 `dyn-clone`（crates.io 公共 crate）。地基阶段不背它。
+> **依赖账**：当前信封实现使用标准库，通过对象安全的 clone_box 方法克隆类型擦除信封；原版使用 dyn_clone::DynClone。当前工程没有引入 dyn-clone，后续广播复用 clone_box。
 
 ## 6. 逐条对比：我们相对原版改了什么
 
 | 维度 | 原版 flow-rs | 本书重写 | 为什么 |
 |---|---|---|---|
 | `downcast` 实现 | `impl dyn AnyEnvelope` 手写，含 `unsafe` transmute | `as_any() -> &dyn Any` + std 安全 downcast，**零 unsafe** | 更少 unsafe = 更少潜在 UB，把正确性交给标准库 |
-| `EnvelopeInfo` 字段 | 7 个（多数服务未实现特性） | 2 个（`partial_id` / `extra_data`），按需再加 | YAGNI：不提前背未使用的状态 |
-| `M: Clone` 约束 | 绑在主方法块，几乎所有信封都要求 | 拆成 `impl<M: Clone> Clone`，仅广播场景需要 | 约束更精确 → 不可克隆的消息也能流经引擎 |
+| `EnvelopeInfo` 字段 | 7 个 | 同样保留 7 个 | 转发与重打包不丢失协议元信息 |
+| `M: Clone` 约束 | 主方法块有 Clone 约束 | 基本信封操作不要求 Clone，seal 仍要求 Clone | 可构造不可克隆载荷的信封，但当前不能将它封装后送入引擎 |
 | `Send` 约束 | 混在方法块 | 只加在真正要跨线程的 `seal` 上 | 约束跟着需求走 |
-| `dyn_clone` 依赖 | 一开始就继承 `DynClone` | 推迟到 Ch4.1 广播时才引入 | 地基阶段零外部依赖 |
+| `dyn_clone` 依赖 | 继承 `DynClone` | 自行提供对象安全的 clone_box | 用标准库实现类型擦除后的克隆 |
 | 文件组织 | 拆 3 个文件 | 合成 1 个 `envelope.rs` | 一起变的东西放一起 |
 
 这些都不是「为改而改」——每一条都对应「学 Rust」或「更少 bug / 更精确约束」这两个目标里的一个，且都有测试兜底。
@@ -308,3 +324,54 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - **零外部依赖**：纯 std 完成；`dyn-clone` 等推迟到用得上的章节。
 
 下一章 **Ch1.4**：给引擎装上**异步的心跳**——`async`/`await`、`Future`、`tokio` 入门，然后把 tokio 的 channel **封装**成引擎自己的收发端，让 `SealedEnvelope` 真正在任务之间「流动」起来。同样红-绿，代码写进 `code/flow-rs`。
+
+## 独立检查点：不用完整引擎也能完成本章
+
+本章之前不应要求你已经写好 Node、Graph 或过程宏。下面的工程只含消息层，
+不继承本仓库 workspace 的配置，也没有第三方依赖。
+
+在仓库根目录导出到一个尚不存在的目录：
+
+```bash
+python3 scripts/message_checkpoint.py --out /tmp/megflow-message-chapter
+cd /tmp/megflow-message-chapter
+cargo test --offline
+```
+
+若目标已存在，脚本会拒绝覆盖。请换一个新目录，保留你已经写过的代码。
+这里的 offline 用于证明消息层不需要下载第三方 crate；首次安装 Rust 工具链仍需
+按环境章节完成。预期是 8 个源码单元测试和 4 个信封契约测试通过。
+
+生成的文件结构：
+
+```text
+megflow-message-chapter/
+  Cargo.toml
+  src/
+    lib.rs
+    envelope.rs
+  tests/
+    envelope_contract.rs
+```
+
+### 手工搭建时逐个文件做什么
+
+1. 创建 Cargo.toml：package 名为 flow-message，version 为 0.1.0，edition 为 2021。
+   增加空的 `[workspace]`，让它即使放在其他 workspace 内也保持独立；无需 dependencies。
+2. 创建 src/lib.rs，写 `pub mod envelope;`，再公开重导出本章信封类型与 str2addr。
+3. 在 src/envelope.rs 按本章顺序实现元信息、基本信封操作、类型擦除、克隆与占位信封。
+   完整参考文件随检查点导出，遇到报错时比较当前步骤涉及的部分，不必一次复制全部。
+4. 将契约测试放入 tests/envelope_contract.rs。它以外部调用者身份使用 flow_message，
+   能发现“模块内部能用，但库没有公开导出”的问题。
+5. 执行 cargo test --offline，检查测试数量，不能把零测试通过当作本章完成。
+
+### 练习：用测试发现元信息丢失
+
+在导出的副本里，故意将 repack 的新信封元信息改为 Default::default()，再运行测试。
+应当看到元信息保留相关测试失败；修复后恢复通过。不要修改测试期待值来迁就这个错误。
+这个练习帮助你理解：测试约束的是业务契约，不是对现有代码的机械描述。
+
+仓库维护者可以执行 `python3 scripts/check_message_course.py`：脚本每次创建全新
+临时目录、导出工程、离线测试，最后自动清理。CI 也执行同一个命令，防止本章以后
+意外依赖尚未讲到的引擎模块。这个检查点证明本章终点可独立复现，不代表其他章节
+已经全部具备逐步检查点。

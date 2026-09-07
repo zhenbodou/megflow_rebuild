@@ -69,7 +69,7 @@ flow_rs::inventory::submit! {
 }
 ```
 
-为什么 `node_register!` 不像 `#[inputs]` 那样用裸名 `Receiver`、让使用处 `use`？因为 `submit!` 展开成一个 **item 级 `static`**（靠链接期 section 收集），不便要求调用处配一个 `use`——所以它把路径**写死**成 crate 限定的 `flow_rs::`。在**下游** crate 里这天然成立：`flow_rs` 就是那个 crate 对引擎的依赖名。
+为什么 `node_register!` 不像 `#[inputs]` 那样用裸名 `Receiver`、让使用处 `use`？生成器使用明确路径以减少对调用处导入的依赖。inventory 的条目经平台初始化登记，运行时枚举；不是只靠链接器收集后直接迭代。当前 flow_rs 路径要求下游未将依赖改名；改名问题见宏教程第 7 课。
 
 可 `BinaryOp` 现在住在 **flow-rs 自己**里。一个 crate 默认并不用自己的名字指代自己——它的自指名是 `crate`，而不是 `flow_rs`。于是 `flow_rs::inventory` 在 crate 内部**无从解析**。flow-derive 的注释当初甚至为此留了句猜测：「本 crate 内部用宏时才需要 `proc-macro-crate`——那时 `flow_rs::` 前缀失效、得换成 `crate::`」。
 
@@ -97,57 +97,61 @@ pub fn with_args(ty: &str, args: Args) -> Result<Self> {
     //   输出 → Sender 给节点、Receiver 留给沙箱（供 add_check）。
     // 端口按注册表名表顺序排成位置 Vec，交给同一套 ctor——与 Graph Builder 一致。
     let actor = (reg.ctor)(&args, ins, outs)?;
-    Ok(Sandbox { actor: Some(actor), inputs, outputs, subs: Vec::new() })
+    Ok(Sandbox { actor: Some(actor), inputs, outputs, subs: HashMap::new() })
 }
 ```
 
-**`add_data` 有个关键动作：把发送端从沙箱里搬走**，而不是克隆一份。
+### 4.1 按原版接口登记数据源
+
+`add_data("a", |i| if i == 0 { Some(1i32) } else { None })` 接受闭包。
+索引从 0 开始，每次返回 Some 发送一条，None 结束；闭包在 start 时执行，
+登记时不执行。已有 Vec 可以使用本书额外提供的 add_items，内部转成同一种闭包。
+
+要保留元信息，使用 add_envelope 返回完整信封。以下是实际源码中的三个入口：
 
 ```rust,ignore
-pub fn add_data<T: Send + 'static>(&mut self, port: &str, items: Vec<T>) -> &mut Self {
-    let tx = self.inputs.remove(port).unwrap_or_else(|| panic!("无此输入端口 {port:?}"));
-    self.subs.push(Box::pin(async move {
-        for item in items {
-            if tx.send(Envelope::new(item)).await.is_err() { break; }
-        }
-        // tx 在此 drop：该输入 channel 关闭，节点据此判定「这路到头了」。
-    }));
-    self
-}
+{{#include ../../../code/flow-rs/src/sandbox.rs:sandbox_sources}}
 ```
 
-还记得 Ch3.3 那个「诚实的小台阶」吗——一条 channel 要**所有** `Sender` 都 drop 才关闭，调用方得记得连自己克隆的那份一起丢。`remove` 而非 `clone` 正是把这处收进沙箱内部：喂数任务**独占**这唯一的发送端，喂完 drop，channel 干净关闭，绝不会出现「任务放手了、沙箱却还攥着一份、channel 迟迟不关」的挂起。`add_check` 对称——搬走 `Receiver`，起一个循环把消息喂给校验闭包：
+add_data 只负责把载荷包装成 Envelope::new，发送与循环统一交给 add_envelope。
+它先登记任务工厂，在 start 时 remove 输入 Sender，把唯一发送端移进任务，避免沙箱残留 Sender 导致
+数据源结束后输入仍不关闭。与原版一致，发送失败后仍调用有限数据源直到 None；
+所以数据源中的副作用次数不会因节点提前关闭而改变。无限数据源必须自己提供结束条件。
+
+重复登记同一个名字时，原版 HashMap::insert 会丢弃旧回调，只执行最后登记的回调。
+当前实现也按端口名保存“任务工厂”：它是一个 FnOnce 闭包，接收端口表，返回一个
+尚未执行的 Future。只有 start 才让工厂取走端口，因而覆盖登记时不必回收已经被移动的
+Receiver。这里多一层闭包是为了解决所有权与覆盖语义，不是额外启动一层线程。
+
+输入和输出沿用原版同一名字空间；若两方向同名，后一次登记同样覆盖前一次。
+这不是两个独立列表。普通节点应明确区分输入输出名字。
+
+### 4.2 正常关闭与检查错误要区分
 
 ```rust,ignore
-pub fn add_check<T, F>(&mut self, port: &str, mut check: F) -> &mut Self
-where T: Send + 'static, F: FnMut(T) + Send + 'static {
-    let mut rx = self.outputs.remove(port).unwrap_or_else(|| panic!("无此输出端口 {port:?}"));
-    self.subs.push(Box::pin(async move {
-        while let Ok(mut env) = rx.recv::<T>().await { check(env.unpack()); }
-    }));
-    self
-}
+{{#include ../../../code/flow-rs/src/sandbox.rs:sandbox_checks}}
 ```
 
-`start` 消费 `self`，spawn 节点 + 全部喂数/收数任务，等它们收尾，返回节点结果：
+add_check 只关心载荷，add_envelope_check 可检查元信息和空载荷。
+只有 ChannelClosed 表示正常收尾；TypeMismatch 必须返回错误，否则一个类型写错、
+从未执行过断言的测试也可能显示通过。空载荷需要使用完整信封检查器，不能直接 unpack。
 
-```rust,ignore
-pub async fn start(mut self) -> Result<()> {
-    let actor = self.actor.take().expect("start 只能调用一次");
-    let subs = std::mem::take(&mut self.subs);
-    self.inputs.clear();   // 未喂的输入：现在就关，节点不干等它
-    self.outputs.clear();  // 未收的输出：Receiver 关掉
-    let node = actor.start();
-    for h in subs.into_iter().map(tokio::spawn) {
-        h.await.map_err(|e| Error::TaskJoin(e.to_string()))?;
-    }
-    node.await.map_err(|e| Error::TaskJoin(e.to_string()))?   // 两层 Result，同 Ch3.3
-}
+### 4.3 启动和收尾
+
+start 清理未使用的端口，启动节点与所有源/检查任务，先收集子任务结果，再等待节点。
+即使检查器失败，也不能立即返回、丢下尚未完成的节点；当前实现保留第一个检查错误，
+待节点完成后再返回。节点本身仍有任务层与业务层两层 Result。
+
+这个流程不是完整任务监督器：若节点无法自行退出，仍可能等待；panic 或强制取消也
+不能保证异步 finalize。教学测试使用超时，并分别验证正常关闭、业务错误和检查器失败。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test sandbox_envelopes --locked
 ```
 
-**收尾链条**是一串关闭涟漪（Part 1 语义的又一次现身）：喂数任务发完 → drop 输入 `Sender` → 节点 `recv` 到 `ChannelClosed`、退出 exec 循环 → `close()` drop 输出 `Sender` → 收数任务 `recv` 到关闭、收尾。最后那句 `node.await.map_err(..)?` 又是 Ch3.3 的**两层 `Result`**：外层拆「任务崩没崩」、内层留「节点逻辑成没成」——节点的业务错误由此原样成为 `start` 的返回。
-
-> **务必先关端口、再 await 节点**：`self.inputs.clear()` 得排在 `node.await` 之前。否则沙箱攥着未喂输入的 `Sender`，那条 channel 永不关闭，节点会在 `recv` 上干等到天荒地老——这正是把 Ch3.3 的「drop 两份发送端」教训落到实处。
+六个用例检查完整信封源、错误检查类型、检查器 panic 后等待收尾、原版数据闭包的
+调用序号与输出数量、节点提前关闭后继续遍历源，以及同名登记覆盖旧回调。资源注入和动态端口
+仍有差距，不能把这几个入口对齐当成完整 Sandbox 已兼容。
 
 ## 5. 端到端：两条路径都跑出 `1 + 2 == 3`
 
@@ -190,8 +194,8 @@ let collected = Arc::new(Mutex::new(Vec::new()));
 let sink = collected.clone();
 
 let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-sb.add_data("a", vec![1i32])
-  .add_data("b", vec![2i32])
+sb.add_data("a", |i| if i == 0 { Some(1i32) } else { None })
+  .add_data("b", |i| if i == 0 { Some(2i32) } else { None })
   .add_check("c", move |v: i32| sink.lock().unwrap().push(v));
 sb.start().await.unwrap();
 
@@ -202,17 +206,17 @@ assert_eq!(*collected.lock().unwrap(), vec![3]);
 
 ## 6. 错误也走得通
 
-顺带验一条错误支线——`op="/"` 是未知运算符，`exec` 收到数据后返回 `Err(Arg)`，这个错误应当**抬到** `Sandbox::start` 的返回值，而非被静默吞掉：
+顺带验一条错误支线——`op="%"` 是未知运算符，`exec` 收到数据后返回 `Err(Arg)`，这个错误应当**抬到** `Sandbox::start` 的返回值，而非被静默吞掉：
 
 ```rust,ignore
-let args: Args = toml::from_str(r#"op = "/""#).unwrap();
+let args: Args = toml::from_str(r#"op = "%""#).unwrap();
 let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-sb.add_data("a", vec![1i32]).add_data("b", vec![2i32]);
+sb.add_items("a", vec![1i32]).add_items("b", vec![2i32]);
 let result: Result<()> = sb.start().await;
 assert!(matches!(result, Err(Error::Arg { .. })));
 ```
 
-它钉死的和 Ch3.3 错误支线同源：节点的**业务错误**经任务收尾、经那句 `node.await...?` 的**内层**原样抬出——`Arg`，不是 `TaskJoin`。至此 flow-rs 全套 **51 项测试**（较上一章 +3）全绿，clippy `-D warnings` 干净。
+它钉死的和 Ch3.3 错误支线同源：节点的**业务错误**经任务收尾、经那句 `node.await...?` 的**内层**原样抬出——`Arg`，不是 `TaskJoin`。实际通过数量以当前测试输出为准；增加测试后不沿用旧章节的历史数字。
 
 ## 小结
 

@@ -252,3 +252,113 @@ test result: ok. 5 passed; 0 failed
 **Part 1 完成**。我们现在有了：能装任意载荷、能类型擦除的**消息层**（`flow-message`），和能在异步任务间搬运它的**通道**（`flow-rs::channel`）。
 
 下一部分 **Part 2 · 节点与过程宏**：让消息真正「被处理」。先手写一个 `Node`/`Actor` trait 和它的 `exec` 循环（不用宏，看清本质），再一头扎进 **过程宏**——`proc-macro2` / `syn` / `quote`，亲手实现 `#[derive(Node)]`、`inputs!`/`outputs!` 和编译期注册表 `node_register!`。那是本书「学 Rust」含金量最高的一段，也是 MegFlow 最有辨识度的设计。
+
+## 原版协议补充：容量 0 与无界通道
+
+原版 `flow-rs/src/channel/storage.rs` 的 ChannelStorage::new 明确规定：cap 大于 0
+创建有界队列，否则创建无界队列。因此 TOML 中 `cap = 0` 不是非法容量，也不是
+发送方必须等接收方接手的会合通道。
+
+当前 `code/flow-rs/src/channel.rs` 使用两个内部枚举保存 Tokio 的有界和无界端点。
+channel(0) 调用 unbounded_channel，正容量调用 channel(capacity)。外部 Sender/Receiver
+接口保持一致，send_any 和 recv_any 在内部 match 对应分支。
+
+为什么无界发送还保留 async 方法？这是引擎的统一接口；无界分支本身直接入队，
+不等待容量腾出。有界分支仍可能暂停直到容量可用。async 并不意味着每次调用都暂停。
+无界队列没有容量背压，生产长期快于消费时，待处理消息会持续占用内存。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test unbounded_channel --locked
+```
+
+测试先完成 1000 条发送，再接收，证明发送不依赖消费者腾出容量；随后验证最后一个
+发送端释放后仍能排空队列，以及接收端释放后的发送错误。测试设置超时，避免错误地
+实现成有界队列后无限挂起。
+
+### 还不能把这一层称为完整原版通道
+
+原版 Receiver 可克隆并由多个消费者竞争接收；当前仍是 MPSC。原版 sender.rs
+还对 DummyEnvelope 按发送端 epoch 做汇合：同一轮参与发送端的信号收齐后才向队列
+发送一个信号。receiver.rs 则把 flush 事件转成接收错误，由上层生命周期协议处理。
+这与普通 `Envelope::<T>::empty()` 不同，不能简单用“载荷为空”判断 flush。
+
+原版还有批量接收、超时、类型转换表、计数和统计。移植时必须联合验证 Actor 与
+通道的控制流；只新增同名方法或把 flush 当永久关闭，会使动态子图提前退出。
+本章的普通消息与容量测试不覆盖这些能力，完整迁移仍见验收账本。
+
+练习：为什么容量 1 的通道不能用“先发 1000 条再收”的测试？第二条发送可能等待
+容量，而主任务还没进入接收阶段，测试自己造成死锁。有界场景需并发生产和消费。
+
+## 批量接收：按权重凑一批
+
+原版 receiver.rs 的 batch_recv_any 使用 `weight.unwrap_or(1)` 累加权重。
+所以 n=3 不一定返回三条消息：权重依次为 0、1、4 时，返回三条，累计权重为 5；
+如果第一条权重就是 4，则一条便足够。None 默认算 1，Some(0) 算 0，不能混为一谈。
+
+从单条接收扩展为批量接收，新增三个状态：已经收到的 batch、累计 weight、整批共享的
+计时器。计时器在循环外创建，不能每收一条就重新计时，否则持续有消息时可能永不超时。
+
+```rust,ignore
+{{#include ../../../code/flow-rs/src/channel.rs:batch_receive}}
+```
+
+`tokio::pin!` 让计时器在循环的多次 select 中保持同一个 Future。select 等待超时或
+下一条消息，哪一项就绪就处理哪一项；两项同时就绪时不承诺固定优先级。
+
+返回规则要分别记住：
+
+| 条件 | 返回值 | 已收到的消息 |
+| --- | --- | --- |
+| n=0 | Ok(空 Vec) | 不消费队列 |
+| 累计权重达到 n | Ok(batch) | 包括让权重越过阈值的整条消息 |
+| 整批超时 | Ok(batch) | 可以为空或不足阈值 |
+| 输入提前关闭 | Err(BatchRecvError::Closed(batch)) | 放在错误里交还调用者 |
+
+若收到关闭错误就直接丢弃错误值，部分批次也会丢失。业务节点需要显式 match
+Closed(batch)，决定处理剩余数据还是报告不完整。类型化 batch_recv 在接收后转换
+每个信封；与原版一样，类型错误会 panic。它不同于本书单条 recv 的 TypeMismatch 返回，
+调用者不能假定当前所有入口有统一错误模型，完整 API 对照仍需继续完成。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test batch_receive --locked
+```
+
+三个测试验证零权重与默认权重、超过阈值后的剩余消息、n=0 不消费、关闭时携带部分批次，
+以及超时后接收端仍可继续使用。生产依赖也必须启用 Tokio 的 time feature，不能只在
+dev-dependencies 中打开；否则测试通过而下游正常构建失败。
+
+本次实现尚未接入原版 flush epoch 协议。原版遇到 flush 也会以 Closed(batch) 返回，
+但底层通道未必永久关闭；后续必须由 Actor 区分轮次结束与真正关闭。
+
+练习：若 batch_recv(2, ...) 返回长度为 1 的 Ok，是否错误？不一定，可能是权重
+已经达到 2，也可能是超时。该接口只返回批次，不额外标识这两个成功原因。
+
+## 限时接收：三种结果不能混淆
+
+原版 `try_recv_any(dur)` 会等待最多给定时长，名称中的 try 不表示立即返回。
+它不同于许多队列的同步 try_recv。当前补充的实现如下：
+
+```rust,ignore
+{{#include ../../../code/flow-rs/src/channel.rs:timed_receive}}
+```
+
+外层 Result 回答“接收是否遇到错误”，内层 Option 回答“本次等待有没有收到消息”：
+
+- `Ok(Some(envelope))`：收到一条信封，其载荷本身仍可能为空。
+- `Ok(None)`：等待超时，通道依旧可用，可以再次接收。
+- `Err(ChannelClosed)`：当前实现已关闭且没有剩余消息。
+
+例如视频节点周期性检查新帧时，Ok(None) 可以触发一次空闲处理，不能直接作为退出条件。
+`Some(Envelope::empty())` 则确实消耗了一条队列消息，其 partial_id 等元信息仍须保留。
+限时接收的类型转换沿用原版的类型不匹配 panic 行为。
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test timed_receive --locked
+```
+
+测试对有界和无界通道验证：先超时、再发送、再接收成功、最后关闭；另验证空载荷和
+元信息。超时分支会取消本次等待，但不能取走后来到达的消息。零时长与已就绪消息同时
+出现时，不承诺哪个分支胜出，因此不要用它代替精确的同步非阻塞队列操作。
+
+原版 flush 也能令本次接收返回错误，但通道不一定永久关闭。当前 flush 尚未接入，
+上述关闭判断仅描述已经实现的普通消息路径。

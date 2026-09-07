@@ -110,13 +110,13 @@ async fn start_runs_all_nodes_then_stop_shuts_down() {
 
 #[tokio::test]
 async fn node_error_propagates_through_aggregate_handle() {
-    // op="/" 是未知运算符：节点收到数据后 exec 返回 Err(Arg)，任务以 Err 收尾，
+    // op="%" 是未知运算符：节点收到数据后 exec 返回 Err(Arg)，任务以 Err 收尾，
     // 该错误经聚合句柄一路抬到 handle.await。
     let toml = r#"
 main = "example"
 [[graphs]]
 name = "example"
-nodes = [{name="div", ty="TestBinaryOp", op="/"}]
+nodes = [{name="div", ty="TestBinaryOp", op="%"}]
 inputs = [
     {name="a", cap=8, ports=["div:a"]},
     {name="b", cap=8, ports=["div:b"]}

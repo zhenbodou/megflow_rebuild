@@ -16,18 +16,25 @@
 - [Ch1.3 实现 Envelope 消息信封与类型擦除消息层](part1/ch03-envelope.md)
 - [Ch1.4 async/await、Future、tokio 入门 → channel 封装](part1/ch04-async-channel.md)
 
-# 第 2 部分 · 节点与过程宏
+# 独立专题 · Rust 宏：从入门到专家实践
 
-- [Ch2.0 宏从零开始：macro_rules! 与展开](part2/ch00-macro-rules.md)
+- [学习路线与验收标准](macros/00-roadmap.md)
+- [第 1 课：宏是什么，怎样读展开结果](macros/01-basics.md)
+- [第 2 课：声明宏的递归、歧义与卫生性](macros/02-declarative.md)
+- [第 3 课：过程宏与编译阶段](macros/03-procedural.md)
+- [第 4 课：proc-macro2、syn、quote 实操](macros/04-tokens.md)
+- [第 5 课：从零创建三种过程宏](macros/05-three-forms.md)
+- [第 6 课：泛型、辅助属性与精确约束](macros/06-generics.md)
+- [第 7 课：路径、属性组合与 AST 改写](macros/07-composition.md)
+- [第 8 课：诊断、编译测试与运行语义](macros/08-engineering.md)
+- [第 9 课：性能、兼容性与发布维护](macros/09-maintenance.md)
+- [第 10 课：crate 协作与 MegFlow 毕业实战](macros/10-megflow.md)
+
+# 第 2 部分 · 用宏实现节点
+
 - [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）](part2/ch01-node-trait.md)
-- [Ch2.2 过程宏入门：proc-macro2 / syn / quote](part2/ch02-proc-macro-intro.md)
-- [Ch2.2a Token → AST → Token：三个 crate 实操](part2/ch02a-token-workshop.md)
-- [Ch2.2b 独立小工程：三种过程宏与泛型](part2/ch02b-three-forms.md)
 - [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏](part2/ch03-node-macros.md)
-- [Ch2.3a 宏工程化：错误定位、trybuild 与生命周期](part2/ch03a-macro-engineering.md)
-- [Ch2.4 node_register! 与 inventory 编译期注册表](part2/ch04-registry.md)
-
-- [Ch2.4a 注册实操、crate 协作与原版宏清单](part2/ch04a-crates-and-parity.md)
+- [Ch2.4 node_register! 与 inventory 注册表](part2/ch04-registry.md)
 
 # 第 3 部分 · 图与运行时
 
@@ -42,6 +49,7 @@
 - [Ch4.2 数组端口与广播/汇聚：Bcast / Merge（扇出与扇入）](part4/ch02-array-ports-bcast-merge.md)
 - [Ch4.3 Resource 与 Context：共享模型 / 内存池](part4/ch03-resource-context.md)
 - [Ch4.4 子图 subgraph、多图 graphs、动态子图](part4/ch04-subgraph.md)
+- [Ch4.5 Reorder：恢复连续序列与原版对照](part4/ch05-reorder.md)
 
 # 第 5 部分 · 兼容 · 优化 · 收尾
 

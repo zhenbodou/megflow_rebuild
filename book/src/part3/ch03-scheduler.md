@@ -169,7 +169,7 @@ handle.await.unwrap().unwrap();               // 两节点都收尾 → 聚合�
 
 `handle.await.unwrap().unwrap()` 能顺利返回，恰恰证明了聚合句柄**等齐了两个**任务：只要有一个没停，这句就悬着。
 
-**错误支线 `node_error_propagates_through_aggregate_handle`**——给 `op="/"`（未知运算符），节点收到数据后 `exec` 返回 `Err(Arg)`：
+**错误支线 `node_error_propagates_through_aggregate_handle`**——给 `op="%"`（未知运算符），节点收到数据后 `exec` 返回 `Err(Arg)`：
 
 ```rust,ignore
 let handle = g.start();

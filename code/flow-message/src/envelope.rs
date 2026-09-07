@@ -13,19 +13,41 @@
 use std::any::Any;
 use std::sync::Arc;
 
-/// 随信封一起流动的公共元信息。/ Metadata that travels alongside a message.
-///
-/// 先只放引擎当前真正要用到的两个字段；其余（weight / from_addr / …）待对应
-/// 特性（重排序、寻址）落地时再按需增补——避免提前引入用不上的状态。
-/// Only the two fields the engine needs right now; the rest grow in when the
-/// features that use them (reorder, addressing) actually land.
+/// 将端口字符串转为寻址 ID。与原版相同：先解析十进制 u64，否则使用 DefaultHasher。
+/// 哈希算法不承诺跨 Rust 版本稳定，不应用作永久存储协议。
+// ANCHOR: str2addr
+pub fn str2addr(value: &str) -> u64 {
+    if let Ok(address) = value.parse::<u64>() {
+        return address;
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+// ANCHOR_END: str2addr
+
+/// 随信封一起流动的七项公共元信息，与原版 Rust EnvelopeInfo 对齐。
+// ANCHOR: envelope_info
 #[derive(Default, Clone)]
 pub struct EnvelopeInfo {
-    /// 序号（可重复），用于重排序等场景。/ sequence id (may repeat), for reordering.
+    /// 是否跳过业务处理；标志本身不负责过滤消息。
+    pub skipped: bool,
+    /// 批处理权重；None 与 Some(0) 是不同状态。
+    pub weight: Option<usize>,
+    /// 序号；信封允许重复，使用者决定重复序号的业务规则。
     pub partial_id: Option<u64>,
-    /// 任意类型、可跨线程共享的附带数据。/ arbitrary, thread-shareable side data.
+    /// 来源地址。
+    pub from_addr: Option<u64>,
+    /// 目标地址，供 Demux 等节点寻址。
+    pub to_addr: Option<u64>,
+    /// 中转地址。
+    pub transfer_addr: Option<u64>,
+    /// 可跨线程共享的附带数据；克隆信封共享同一 Arc。
     pub extra_data: Option<Arc<dyn Any + Send + Sync>>,
 }
+// ANCHOR_END: envelope_info
 
 /// 信封：把一条消息 `M` 连同元信息 `EnvelopeInfo` 一起装起来。
 /// An envelope wrapping a message `M` plus its `EnvelopeInfo`.

@@ -48,6 +48,9 @@ jobs:
       - name: Validate Rust implementation
         run: cargo test --manifest-path code/Cargo.toml --workspace --locked
 
+      - name: Validate standalone message chapter
+        run: python3 scripts/check_message_course.py
+
       - name: Validate runnable macro course and checkpoints
         run: python3 scripts/check_macro_course.py
 

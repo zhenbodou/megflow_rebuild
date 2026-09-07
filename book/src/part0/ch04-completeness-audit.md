@@ -18,8 +18,8 @@ C/Python 绑定的业务逻辑如果同时为 Rust 路径服务，也要保留�
 | 能力 | 原版证据 | 当前实现与缺口 | 证明完成需要的验证 |
 | --- | --- | --- | --- |
 | 四则运算示例 | `flow-rs/src/lib.rs` | 已补除法及左信封元信息传递 | 四种运算、不同左右元信息的端到端测试 |
-| 完整信封 | `flow-rs/src/envelope/` | `flow-message/src/envelope.rs` 只有部分元信息 | 字段默认值、寻址、权重、重打包及空信封语义逐项对照 |
-| 通道 | `flow-rs/src/channel/` | Tokio mpsc 包装，不等于原版完整协议 | 多消费者、关闭、背压、空信号及批处理路径 |
+| 完整信封 | `flow-rs/src/envelope/` | 已补齐七项元信息及 str2addr；消费者协议仍需逐项验收 | 字段默认值、寻址、权重、重打包及空信封语义逐项对照 |
+| 通道 | `flow-rs/src/channel/` | 已补 cap=0 无界分支、限时接收与按权重批量接收；仍缺 flush、多消费者，底层为 Tokio MPSC，不等于原版完整协议 | 多消费者、关闭、背压、空信号及批处理路径 |
 | 节点与宏 | `flow-derive/src/` | 简化端口语法和生命周期接口 | 原版合法 Rust 节点编译、运行与非法输入诊断 |
 | 配置 | `flow-rs/src/config/` | 直接 serde 解析与静态展开 | 模板、预处理、类型推断、连接校验及原版配置夹具 |
 | 动态子图 | `flow-rs/tests/02-dyn-subgraph.rs` | 仅静态子图内联 | 运行期创建、逐消息寻址、关闭和回收 |
@@ -27,7 +27,7 @@ C/Python 绑定的业务逻辑如果同时为 Rust 路径服务，也要保留�
 | 隔离、多图、分派 | `flow-rs/tests/04-isolated.rs`、`05-multi-graph.rs`、`06-dispatcher.rs` | 尚未逐项迁移 | 对应原版测试场景和消息归属断言 |
 | 类型信息与特性 | `flow-rs/tests/07-typeinfo.rs`、`08-graph-features.rs` | 尚未对齐 | 错配端口建图失败、特性选择行为 |
 | 优化器 | `flow-rs/tests/09-graph-optimizer.rs` | 无对应模块 | 每个 pass 的拓扑变换与优化前后业务结果 |
-| 内置节点 | `flow-rs/src/node/` | 有 Bcast、Merge、Transform 等，缺少完整动态转换、Demux、Reorder、shared 路径 | 每类节点的数据、元信息、关闭和边界行为 |
+| 内置节点 | `flow-rs/src/node/` | 有 Bcast、Merge、Transform 等，已补 Reorder 普通消息路径，缺少完整动态转换、Demux、shared 和空信号协议 | 每类节点的数据、元信息、关闭和边界行为 |
 | 资源与上下文 | `flow-rs/src/resource/`、`graph/context.rs` | 简化按名获取 | 作用域、共享、构造次数及释放顺序 |
 | 消息业务类型 | `flow-message/src/algo_base/` | 当前同名 crate 主要承载引擎信封 | Frame、Image、Item、Feature 等模型及转换 |
 | Rust 服务插件 | `flow-plugins/src/` | 工作区没有对应 crate | bytes/image/video 服务和 glider/limbo 协议行为 |
@@ -76,3 +76,30 @@ inventory 实验、crate 协作和原版宏逐项差距。完整原版宏协议�
 
 这些证据只对应上述条目。尤其 methods 的原版参数适配、配置更新回调、动态端口等
 仍未完成；详见 Ch2.4a 的完整原版宏清单。
+
+
+## 独立宏课程的增补记录
+
+宏教学已整理为 [10 课连续专题](../macros/00-roadmap.md)，覆盖声明宏递归与片段转发、
+三种过程宏、syn/quote 实操、辅助属性与泛型约束、路径与属性组合、诊断测试、
+构建性能和发布维护。新增 Describe 实验在独立下游验证生命周期、const 泛型、
+已有 where、默认类型参数及跳过字段不施加多余约束；课程检查脚本覆盖这些实验。
+
+这份记录只更新教学覆盖，不将原版尚未实现的宏和运行时能力标为完成。
+依赖改名、no_std、feature 矩阵等已解释实现和验收方法，但未验证的能力在课程中明确标注。
+
+## Reorder 与信封的验证记录
+
+七项元信息与寻址转换由 envelope_contract 验证。Reorder 使用原版 exec 原文加测试 I/O 适配器作为对照，比较 720 种排列以及重复、缺口、缺失序号、空载荷场景；另验证容量 1、元信息与 Arc 身份、下游关闭、输入未关闭时输出连续前缀。详见 [Reorder 教程](../part4/ch05-reorder.md)。此对照没有运行原版完整通道和 Actor，不能证明 flush 协议或完整运行时已对齐。
+
+## Sandbox 数据源接口记录
+
+add_data 已改为原版 `FnMut(usize) -> Option<T>` 形式，Vec 便利入口另命名 add_items；
+发送失败仍继续调用源直到 None，匹配原版有限数据源的副作用次数。sandbox_envelopes
+测试验证延迟执行、索引、数量和提前关闭。同名回调替换已改为原版的按名字覆盖，并用旧回调 panic、新回调输出的测试验证；完整资源与动态端口仍待补齐。
+
+## 初学者复现记录
+
+消息层新增独立检查点：message_checkpoint.py 导出不继承主 workspace 的完整工程，
+check_message_course.py 在全新临时目录离线构建并运行 12 项测试。CI 已增加该检查。
+这证明 Ch1.3 的终点可以独立复现；逐章中间步骤和其余运行时章节仍需继续建立检查点。

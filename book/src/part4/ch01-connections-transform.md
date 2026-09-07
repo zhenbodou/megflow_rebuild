@@ -199,9 +199,9 @@ node_register!("Transform", Transform);
 
 ```rust,ignore
 // 搬 i32
-sb.add_data("inp", vec![1i32, 2, 3]).add_check("out", move |v: i32| sink.push(v));
+sb.add_items("inp", vec![1i32, 2, 3]).add_check("out", move |v: i32| sink.push(v));
 // 换成同一个 Transform，搬 String——照转不误
-sb.add_data("inp", vec!["a".to_string(), "bc".to_string()]).add_check("out", move |v: String| sink.push(v));
+sb.add_items("inp", vec!["a".to_string(), "bc".to_string()]).add_check("out", move |v: String| sink.push(v));
 ```
 
 `Transform` 是流水线里最朴素的一块积木：占位、解耦、当调试探针，都用得上。它兑现了 Ch1.3「封箱 + 类型擦除」那层设计——正因为消息能被封进不透明的信封，才可能有「不看类型也能搬」的节点。
