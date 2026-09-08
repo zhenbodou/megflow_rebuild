@@ -2,6 +2,9 @@
 
 Ch2.1 我们手写 `Doubler`、数出满屏样板；Ch2.2 学会了过程宏三件套并写出第一个派生宏。这一章把三件套用到刀刃上——写出 MegFlow 真正的节点宏，把那 ~50 行样板**塌缩成几行声明**。写完这章，Part 2 的核心——节点契约（Ch2.1）与生成节点的宏（Ch2.2/2.3）——就位了；只差 Ch2.4 的编译期注册表来收尾。
 
+先完成 [从手写实现追踪宏展开](ch03b-expansion-walkthrough.md)。本章开头不带 Context
+的手写版本是教学阶段；最终 Actor 宏调用 initialize(&ctx)，不要把两阶段签名混用。
+
 <!-- toc -->
 
 ## 1. 目标：塌缩前后
@@ -22,7 +25,7 @@ impl Doubler {
             Ok(mut e) => {
                 let doubled = e.unpack() * 2;
                 if let Some(out) = self.out.as_ref() {
-                    out.send(Envelope::new(doubled)).await?;
+                    out.send(e.repack(doubled)).await?;
                 }
             }
             Err(Error::ChannelClosed) => self.input_closed = true,
@@ -39,10 +42,13 @@ impl Actor for Doubler {
     fn start(mut self: Box<Self>) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             self.initialize().await;
-            while !self.is_all_input_closed() { self.exec().await?; }
+            let result = async {
+                while !self.is_all_input_closed() { self.exec().await?; }
+                Ok(())
+            }.await;
             self.close();
             self.finalize().await;
-            Ok(())
+            result
         })
     }
 }

@@ -38,22 +38,18 @@ flowchart LR
     C -.->|"队列空则让出"| RT
 ```
 
-## 2. 为什么用 tokio，替换原版的有栈协程
+## 2. 原版同样以 Tokio 为基础
 
-原版 flow-rs 自带一套**有栈协程（stackful coroutine）**运行时（`rt/{spawn_pinned, rwlock}` 等）：每个协程有自己的栈，靠手写的调度与 `unsafe` 切换上下文。它能工作，但代价是**大量 `unsafe`**、自维护调度器、以及和生态（tokio 那套异步库）割裂。
+参照版本的 `flow-rs/src/rt/mod.rs` 包含 `pub use tokio::*`，并构造 Tokio 多线程运行时。
+`rt/spawn_pinned.rs` 使用 Tokio LocalSet 支持固定在线程上运行的 !Send 任务。
+因此不能把原版整个 Rust 运行时描述成“自制有栈协程”，也不能说本书只是把有栈换成无栈
+就完成了等价重构。
 
-我们重写的关键决策之一（spec 里定的）：**换成原生 `async` + tokio**。
+本书先学习普通 Tokio async 任务，后续仍需迁移原版的线程固定、本地任务池、锁包装、
+入口宏和统计等行为。原版存在与同步/外部调用相关的 stackful 路径，不意味着所有节点
+都运行在自制的有栈调度器上。判断范围应以具体模块和 feature 为准。
 
-| | 原版：有栈协程 | 重写：tokio async |
-|---|---|---|
-| 机制 | 每协程独立栈，手写上下文切换 | 无栈状态机，编译器改写 `async fn` |
-| unsafe | 多（栈切换、pin） | 极少（几乎交给 tokio/std） |
-| 生态 | 自成一套 | 直接用 tokio 的 channel/锁/定时器 |
-| 学习价值 | 偏门 | **主流 Rust 异步**，可迁移 |
-
-对本书三个目标都对味：**学 Rust**（学的是主流异步范式）、**更少 bug**（把调度/同步交给久经考验的 tokio，自己不写 `unsafe` 栈切换）、**功能一致**（tokio 的多线程运行时同样能跑成百上千个节点任务）。
-
-> 有栈 vs 无栈不是「谁绝对好」——有栈协程在某些递归/深调用场景更省心。但对一个「节点在 `.await` 点让出」的 dataflow 引擎，无栈 async 恰好够用，且省下的 `unsafe` 和自维护调度器是实打实的复杂度削减。
+学 Tokio 的理由是理解原版已有的基础并能维护它，而不是凭替换库的名字证明业务等价。
 
 ## 3. tokio 入门：运行时、`spawn`、`mpsc`
 
@@ -73,6 +69,8 @@ thiserror = "2"
 ```
 
 `sync` 给我们 `mpsc`，`rt` + `macros` 给我们 `#[tokio::test]`/`#[tokio::main]`。**只开用得到的 feature**，不把整个 tokio 拉进来。
+
+先完成 [异步三步实验](ch04a-async-workshop.md)，能解释 Future、背压与关闭，再实现下节的封装。
 
 ## 4. 红：先写通道的收发测试
 
@@ -240,7 +238,7 @@ test result: ok. 5 passed; 0 failed
 这一章给引擎装上了异步心跳，也补齐了 Part 1 的地基：
 
 - **异步三件套**：`Future` 是惰性状态机（`poll` 问「好了吗」）；`async fn` 返回 Future；`.await` 是**协作式让出点**——让出任务而非阻塞线程。
-- **tokio 替换有栈协程**：主流无栈 async，少 unsafe、接生态；用到运行时、`spawn`、`mpsc` 三样。
+- **理解 Tokio 基础**：原版也使用 Tokio；本章先学习运行时、`spawn` 和队列，扩展协议仍需逐项迁移。
 - **通道封装**：`tokio::sync::mpsc` 薄封装成承载 `SealedEnvelope` 的 `Sender`/`Receiver`；`send_any`/`recv_any` + 类型化 `send::<T>`/`recv::<T>`（seal / 安全 downcast 各薄薄一层）。
 - **错误落地**：`thiserror` 的 `Error` 枚举第一次写进 `code/`，两变体、按需生长。
 - **化简**：广播/demux 上移到节点层，通道保持极简；对比原版削掉大量 unsafe 与自制机制。

@@ -15,7 +15,9 @@ for package, example in (
     ("flow-derive", "macro_rules_basics"),
     ("flow-derive", "macro_rules_advanced"),
     ("flow-derive", "token_workshop"),
+    ("flow-derive", "node_expansion_walkthrough"),
     ("flow-rs", "registry_basics"),
+    ("flow-rs", "registry_from_functions"),
 ):
     run("cargo", "run", "--manifest-path", "code/Cargo.toml", "-p", package,
         "--example", example, "--locked")
@@ -32,4 +34,4 @@ with tempfile.TemporaryDirectory(prefix="megflow-macro-course-") as directory:
         run(sys.executable, "scripts/macro_checkpoint.py", "--stage", stage, "--out", target)
         run("cargo", "run", "--manifest-path", target / "Cargo.toml", "-p",
             "macro-lab-app", "--locked", "--target-dir", temporary / "target")
-print("宏课程：五个示例、进阶宏测试和三个独立检查点全部通过。")
+print("宏课程：七个示例、进阶宏测试和三个独立检查点全部通过。")

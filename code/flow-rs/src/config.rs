@@ -3,7 +3,7 @@
 //! Part 3 的起点：把 Ch0.3 钉死的那段**图拓扑 TOML**，反序列化成一组**类型化
 //! 结构**。这是引擎的「presentation 层」——只管「文本 → 结构」这一步，**不做**
 //! 跨引用校验（端口引用 `"add:a"` 里的 `add` 到底存不存在、类型对不对，留到
-//! Ch3.2 的 `Builder::build()`；这正是「**把校验前移到 build()**」这条优化的分工）。
+//! Ch3.2 的 `Builder::build()`）。原版也有配置连接检查和类型推断。
 //!
 //! 用两块生态基石：
 //! - **`serde`**：通用序列化框架。`#[derive(Deserialize)]` 自动为结构体生成解析逻辑。
@@ -91,8 +91,8 @@ pub struct GraphConfig {
 /// **注意这里没有 `deny_unknown_fields`**——恰恰相反，「未知键」正是我们要的：
 /// `op="+"` 这类节点自有参数会被 `#[serde(flatten)]` 收进 `args`，原样交给节点的
 /// 构造器（Ch0.3 里 `args["op"]` 读到的就是它）。serde 有一条**硬性限制**：
-/// `flatten` 与 `deny_unknown_fields` **不能共存**——因为 flatten 就是「兜住其余
-/// 所有键」，与「拒绝未知键」语义直接冲突。所以本结构体故意不加 deny。
+/// 官方不支持将 `flatten` 与 `deny_unknown_fields` 组合使用；这不意味着任何
+/// 组合都会触发编译错误。本结构体需要收集节点私有参数，因此不加 deny。
 #[derive(Debug, Clone, Deserialize)]
 pub struct NodeConfig {
     /// 节点在本图内的实例名（图内唯一）。
@@ -142,7 +142,8 @@ pub struct PortConfig {
 /// 图里两个（或多个）节点端口接到同一条 channel 上。方向不写死在配置里，而是**由端口
 /// 角色推断**：引用里指向某节点**输出端口**的那一端是发送方、指向**输入端口**的那一端
 /// 是接收方（Ch3.2 的注册表 `inputs`/`outputs` 端口名表就是判据）。mpsc 单消费者要求
-/// 一条连接恰有 1 个接收端、≥1 个发送端（扇入）；扇出到多个消费者需要 bcast 节点。
+/// 一条连接至少有 1 个接收端和 1 个发送端；多个接收端竞争同一队列。
+/// 若要求每个消费者都收到一份消息，应通过 bcast 连接不同队列。
 ///
 /// An anonymous internal edge: a channel plus the `"node:port"` refs hung on it.
 /// Direction is inferred per endpoint from its port role (output → sender, input → receiver).

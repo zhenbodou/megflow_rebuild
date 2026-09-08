@@ -50,7 +50,7 @@ impl TestBinaryOp {
             }
         };
         if let Some(out) = self.c.as_ref() {
-            out.send(Envelope::new(r)).await?;
+            out.send(ea.repack(r)).await?;
         }
         Ok(())
     }
@@ -172,9 +172,8 @@ outputs = [{name="c", cap=8, ports=["add:c"]}]
     assert!(matches!(err, Error::UnknownPort { .. }));
 }
 
-#[test]
-fn unconnected_port_errors() {
-    // add 需要 a、b 两个输入，TOML 只接了 a → 端口未接线。
+#[tokio::test]
+async fn unconnected_input_builds_and_closes_without_data() {
     let toml = r#"
 main = "example"
 [[graphs]]
@@ -183,8 +182,54 @@ nodes = [{name="add", ty="TestBinaryOp", op="+"}]
 inputs = [{name="a", cap=8, ports=["add:a"]}]
 outputs = [{name="c", cap=8, ports=["add:c"]}]
 "#;
-    let err = Builder::default().template(toml).build().unwrap_err();
-    assert!(matches!(err, Error::PortNotConnected { .. }));
+    let mut graph = Builder::default().template(toml).build().unwrap();
+    let input = graph.input("a").unwrap();
+    let output = graph.take_output("c").unwrap();
+    let handle = graph.start();
+    // a 先收到消息，b 的默认接收端随后立即报告关闭。
+    input.send(Envelope::new(10i32)).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        handle.await.unwrap().unwrap();
+        assert!(matches!(output.recv_any().await, Err(Error::ChannelClosed)));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unconnected_output_discards_and_node_finishes_normally() {
+    let toml = ADD_GRAPH.replace(
+        "outputs = [{name=\"c\", cap=8, ports=[\"add:c\"]}]",
+        "outputs = []",
+    );
+    let mut graph = Builder::default().template(toml).build().unwrap();
+    let a = graph.input("a").unwrap();
+    let b = graph.input("b").unwrap();
+    let handle = graph.start();
+    a.send(Envelope::new(10i32)).await.unwrap();
+    b.send(Envelope::new(3i32)).await.unwrap();
+    drop(a);
+    drop(b);
+    graph.stop();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn declared_boundary_connections_must_not_be_empty() {
+    // “未声明边界”与“声明了无端点的边界”不同：原版 translate_conn 拒绝后者。
+    for direction in ["inputs", "outputs"] {
+        let text = format!(
+            "main=\"g\"\n[[graphs]]\nname=\"g\"\n{direction}=[{{name=\"edge\",cap=1,ports=[]}}]"
+        );
+        assert!(matches!(
+            Builder::default().template(text).build(),
+            Err(Error::BadConnection(_))
+        ));
+    }
 }
 
 #[test]
@@ -201,3 +246,56 @@ outputs = [{name="c", cap=8, ports=["add:c"]}]
     let err = Builder::default().template(toml).build().unwrap_err();
     assert!(matches!(err, Error::Arg { .. }));
 }
+
+// ANCHOR: wiring_by_name
+#[tokio::test]
+async fn configuration_order_does_not_swap_operands_or_metadata() {
+    // 配置顺序 b、a，注册表字段顺序 a、b；结果必须按名字接线。
+    let text = r#"
+main = "example"
+[[graphs]]
+name = "example"
+nodes = [{name="subtract", ty="TestBinaryOp", op="-"}]
+inputs = [
+    {name="right", cap=1, ports=["subtract:b"]},
+    {name="left", cap=1, ports=["subtract:a"]}
+]
+outputs = [{name="answer", cap=1, ports=["subtract:c"]}]
+"#;
+    let mut graph = Builder::default().template(text).build().unwrap();
+    let left = graph.input("left").unwrap();
+    let right = graph.input("right").unwrap();
+    let output = graph.take_output("answer").unwrap();
+    let handle = graph.start();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        left.send(Envelope::with_info(
+            10i32,
+            flow_message::EnvelopeInfo {
+                partial_id: Some(42),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+        right
+            .send(Envelope::with_info(
+                3i32,
+                flow_message::EnvelopeInfo {
+                    partial_id: Some(99),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        let mut result = output.recv::<i32>().await.unwrap();
+        assert_eq!(result.info().partial_id, Some(42));
+        assert_eq!(result.unpack(), 7);
+        drop(left);
+        drop(right);
+        graph.stop();
+        handle.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
+}
+// ANCHOR_END: wiring_by_name

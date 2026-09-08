@@ -4,11 +4,15 @@ Part 1 造好了**静态地基**：能装任意载荷的消息 `Envelope<M>`，�
 
 本章我们**全部手写、不碰任何宏**，实现一个最小节点，把它跑起来。目的有两个：**看清节点的本质**（它就是一个反复 `exec` 的异步任务），以及**亲身感受样板之多**——为下一章一头扎进过程宏、把这些样板自动生成，攒够动机。
 
+先完成 [手写节点实作](ch01a-manual-actor-workshop.md)：它不依赖节点宏和完整引擎，
+提供本章阶段接口的完整程序。当前参考工程的 Actor::start 后来增加了 Context 参数；
+本章不带 Context 的签名是明确的开发阶段，不应直接覆盖最终接口。
+
 <!-- toc -->
 
 ## 1. 一个节点，就是一个 actor
 
-回忆 Ch0.1 的 actor 模型：每个节点是一个**独立的并发单元**，有自己的输入/输出端口，通过 channel 与别的节点通信，除此之外**不共享状态**。落到实现上，一个节点就是：
+回忆 Ch0.1 的 actor 模型：每个节点是一个**独立的并发单元**，有自己的输入/输出端口，通过 channel 与别的节点通信，节点持有自己的业务状态，也可以通过后续资源机制明确共享数据。落到实现上，一个节点就是：
 
 > 被 spawn 成**一个 tokio 任务**，在任务里反复地「从输入端口收一条 → 处理 → 往输出端口发」，直到上游全部关闭，然后收尾退出。
 
@@ -60,23 +64,26 @@ pub trait Actor: Node + Send + 'static {
 
 ### 2.2 那需要 `async` 的 `exec` 放哪？——放进固有方法
 
-`exec`/`initialize`/`finalize` 天然是 `async`（要 `.await` 收发消息）。既然不能进 trait，那就**根本不进 trait**——把它们写成节点自己的**固有方法（inherent method）**。`start` 在 `spawn` 的那段 `async` 块里**直接调用**它们即可：
+`exec`/`initialize`/`finalize` 天然是 `async`（要 `.await` 收发消息）。当前需要 dyn Actor，先把这些方法放在具体类型上——把它们写成节点自己的**固有方法（inherent method）**。`start` 在 `spawn` 的那段 `async` 块里**直接调用**它们即可：
 
 ```rust,ignore
 fn start(mut self: Box<Self>) -> JoinHandle<Result<()>> {
     tokio::spawn(async move {
         self.initialize().await;                 // ← 调固有方法，非 trait 方法
-        while !self.is_all_input_closed() {
-            self.exec().await?;                  // ← exec 循环，引擎的心跳
-        }
+        let result = async {
+            while !self.is_all_input_closed() {
+                self.exec().await?;
+            }
+            Ok(())
+        }.await;
         self.close();
         self.finalize().await;
-        Ok(())
+        result
     })
 }
 ```
 
-这就是原版那个巧思的全部：**把「需要 async 的部分」关在固有方法里，trait 表面只留一个非 async 的 `start`。** 既拿到了 `async` 的表达力，又保住了 `dyn` 的对象安全。Ch2.3 用 `#[derive(Actor)]` 生成的，正是这段 `start`。
+这是本阶段选择的接口组织方式：**把「需要 async 的部分」关在固有方法里，trait 表面只留一个非 async 的 `start`。** 既拿到了 `async` 的表达力，又保住了 `dyn` 的对象安全。Ch2.3 用 `#[derive(Actor)]` 生成的，正是这段 `start`。
 
 > 题外话：社区有 `async-trait` 宏（把 async trait 方法脱糖成返回 `Box<dyn Future>`）能直接绕过对象安全问题。但那要每次调用都堆一次 `Box` 分配。原版这套「非 async trait + 固有 async 方法」是**零额外分配**的做法，我们沿用。
 
@@ -131,7 +138,7 @@ impl Doubler {
             Ok(mut e) => {
                 let doubled = e.unpack() * 2;                 // ← 业务：真正的逻辑，就这 1 行
                 if let Some(out) = self.out.as_ref() {
-                    out.send(Envelope::new(doubled)).await?;  // ← 半业务半样板：发出去
+                    out.send(e.repack(doubled)).await?;  // ← 半业务半样板：发出去
                 }
             }
             Err(Error::ChannelClosed) => self.input_closed = true, // ← 样板：收到关闭 → 记标志
@@ -150,10 +157,13 @@ impl Actor for Doubler {                                   // ← 样板：整�
     fn start(mut self: Box<Self>) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             self.initialize().await;
-            while !self.is_all_input_closed() { self.exec().await?; }
+            let result = async {
+                while !self.is_all_input_closed() { self.exec().await?; }
+                Ok(())
+            }.await;
             self.close();
             self.finalize().await;
-            Ok(())
+            result
         })
     }
 }

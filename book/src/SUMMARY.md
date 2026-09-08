@@ -16,6 +16,7 @@
 - [Ch1.2 泛型、trait、trait 对象 dyn、Any 与 downcast](part1/ch02-traits-dyn.md)
 - [Ch1.3 实现 Envelope 消息信封与类型擦除消息层](part1/ch03-envelope.md)
 - [Ch1.4 async/await、Future、tokio 入门 → channel 封装](part1/ch04-async-channel.md)
+- [Ch1.4a 异步三步实验：Future、背压与关闭](part1/ch04a-async-workshop.md)
 
 # 独立专题 · Rust 宏：从入门到专家实践
 
@@ -34,12 +35,16 @@
 # 第 2 部分 · 用宏实现节点
 
 - [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）](part2/ch01-node-trait.md)
+- [Ch2.1a 手写节点实作：逐步装配与错误收尾](part2/ch01a-manual-actor-workshop.md)
 - [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏](part2/ch03-node-macros.md)
+- [Ch2.3b 从手写实现追踪宏展开](part2/ch03b-expansion-walkthrough.md)
 - [Ch2.4 node_register! 与 inventory 注册表](part2/ch04-registry.md)
+- [Ch2.4b 注册表实作：从函数指针到按名构造](part2/ch04b-registry-workshop.md)
 
 # 第 3 部分 · 图与运行时
 
 - [Ch3.1 serde / toml 与图 TOML schema → 配置解析层](part3/ch01-config.md)
+- [Ch3.1a 配置实作：解析成功之后，还缺什么](part3/ch01a-config-workshop.md)
 - [Ch3.2 Graph Builder：装配节点与 channel](part3/ch02-graph-builder.md)
 - [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机](part3/ch03-scheduler.md)
 - [Ch3.4 端到端跑通 BinaryOp（大里程碑）+ Sandbox 测试框架](part3/ch04-binaryop-e2e.md)

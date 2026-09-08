@@ -51,6 +51,15 @@ jobs:
       - name: Validate standalone message chapter
         run: python3 scripts/check_message_course.py
 
+      - name: Validate standalone async workshop
+        run: python3 scripts/check_async_course.py
+
+      - name: Validate standalone manual node workshop
+        run: python3 scripts/check_manual_node_course.py
+
+      - name: Validate standalone config workshop
+        run: python3 scripts/check_config_course.py
+
       - name: Validate runnable macro course and checkpoints
         run: python3 scripts/check_macro_course.py
 

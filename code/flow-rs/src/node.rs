@@ -90,7 +90,7 @@ mod tests {
                 Ok(mut e) => {
                     let doubled = e.unpack() * 2;
                     if let Some(out) = self.out.as_ref() {
-                        out.send(Envelope::new(doubled)).await?;
+                        out.send(e.repack(doubled)).await?;
                     }
                 }
                 Err(Error::ChannelClosed) => self.input_closed = true,
@@ -113,12 +113,16 @@ mod tests {
         fn start(mut self: Box<Self>, ctx: Context) -> JoinHandle<Result<()>> {
             tokio::spawn(async move {
                 self.initialize(&ctx).await;
-                while !self.is_all_input_closed() {
-                    self.exec().await?;
+                let result = async {
+                    while !self.is_all_input_closed() {
+                        self.exec().await?;
+                    }
+                    Ok(())
                 }
+                .await;
                 self.close();
                 self.finalize().await;
-                Ok(())
+                result
             })
         }
     }

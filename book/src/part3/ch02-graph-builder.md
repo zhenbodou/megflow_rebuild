@@ -4,6 +4,10 @@
 
 这一章是**注册表（Part 2）与配置层（Ch3.1）的合流点**，也是本书迄今最「较真」的一章——因为两条线在这里**对不齐**，得先把错位讲清楚，再看怎么架桥。
 
+本章接线算法的逐步练习与运行验证见 [Ch3.2a 接线实作](ch02a-wiring-workshop.md)。
+
+> 本章早期单端口示意使用 `Vec<Receiver>`；当前构造器使用 `Vec<Vec<Receiver>>`，外层按端口声明顺序，内层表示该端口连接的端点组。写当前工程时以实作章和源码为准。
+
 <!-- toc -->
 
 ## 1. 本章在装配链里的位置
@@ -140,7 +144,7 @@ flowchart TB
     O --> N
     subgraph N["③ 逐节点装配"]
         N1["registry::find(ty)<br/>None → UnknownNodeType"]
-        N2["按 reg.inputs/outputs 顺序<br/>从 node_ins/node_outs 取端口<br/>缺 → PortNotConnected"]
+        N2["按 reg.inputs/outputs 顺序<br/>从 node_ins/node_outs 取端口<br/>未接线标量 → 默认端点"]
         N3["剩余端口没消费掉<br/>→ UnknownPort"]
         N4["(ctor)(&args, ins, outs)?<br/>→ Box&lt;dyn Actor&gt;"]
         N1 --> N2 --> N3 --> N4
@@ -157,8 +161,8 @@ flowchart TB
 
 ```rust,ignore
 for &port in reg.inputs {               // 按注册表声明的端口顺序
-    let rx = ins_map.remove(port)       // 从「按名收集」的表里取
-        .ok_or_else(|| Error::PortNotConnected { /* 该接的端口没接 */ })?;
+    let rx = ins_map.remove(port)       // 此处为单端口阶段示意
+        .unwrap_or_default();           // 未接线保留默认端点
     ins.push(rx);                        // 排进「按位置」的 Vec
 }
 // ……outs 同理……
@@ -167,9 +171,9 @@ actors.push((reg.ctor)(&nd.args, ins, outs)?);
 
 `remove` 而非 `get`，是刻意的：**取一个、少一个**。等注册表声明的端口全取完，`ins_map` 里若还剩东西，说明 TOML 接了一个节点类型上**根本不存在**的端口——正好用来报 `UnknownPort`。
 
-## 6. 跨引用校验：六个 `Error` 变体一次落地
+## 6. 跨引用校验与未接线端点
 
-Ch3.1 承诺过「校验前移到 `build()`」——那些需要**全局视野**才能判断的跨引用错误，都攒到本章一次性查清。`assemble` 走一遍，六种配置错误各有一个精确的落点：
+跨引用检查需要同时查看节点和端口声明。`assemble` 遇到错误立即返回；未接线端口按原版保留默认值。
 
 | 错误 | 触发点 | 变体 |
 |---|---|---|
@@ -177,10 +181,11 @@ Ch3.1 承诺过「校验前移到 `build()`」——那些需要**全局视野**
 | 节点类型名注册表里没有 | `registry::find(ty)` 返回 `None` | `UnknownNodeType` |
 | 端口引用指向不存在的节点 | `node_exists("ghost")` 为假 | `UnknownNode` |
 | 接了节点没有的端口 | 名表消费完，中间表还剩键 | `UnknownPort` |
-| 节点声明的端口没接线 | 按名表取端口时 `remove` 得 `None` | `PortNotConnected` |
+| 节点声明的端口没接线 | 补默认端点，允许建图 | 无错误；接收端关闭，发送端丢弃消息 |
+| 声明的图边界 `ports=[]` | 没有目标或来源 | `BadConnection` |
 | 参数缺失 / 类型不对 | `config::arg` 取不到或转不动 | `Arg` |
 
-这六个变体是本章**按需**加进 `Error` 枚举的——延续全书「错误枚举按需生长」的做法，用到才加。它们的共同价值：**配置错误在建图那一刻、以人话报出**，而不是拖到运行时变成「结果不对」或 panic。这正是相对原版的一处优化——原版有些校验散落在运行路径上，我们把它们收敛成 `build()` 里的一个集中检查点。
+原版 `config/mod.rs::translate_conn` 已检查空连接与引用，`postprocess/conn_check.rs` 对未接线端口只警告。因此，拒绝所有未接线端口并不是兼容性优化。当前默认端点保持原版的收发行为；日志警告尚未复刻。
 
 > **一个设计选择：`assemble` 遇错即返回**（第一个错误就 `?` 抛出），而非收集全部错误再一起报。教学子集里这样最简单直接；「一次报全所有配置错」是可做的增强，但要引入错误累加器，留作练习。
 
@@ -201,7 +206,7 @@ impl MainGraph {
 注意两个方法名里的动词差异，它们直接映射 Part 1 定下的 channel 语义：
 
 - `input` 返回**克隆**的 `Sender`——`Sender` 可 `Clone`（多生产者），复制一份给用户、图里自己也留着一份不碍事。
-- `take_output` 用 `&mut self` 把 `Receiver`**取走**（move）——`Receiver` 是单消费者，不能复制，只能交出所有权。名字里的 `take` 就是这个提示。
+- `take_output` 用 `&mut self` 把 `Receiver`**取走**（move）——这是 API 选择移除图持有的接收端；当前 `Receiver` 可以克隆，克隆之间竞争同一队列的消息。名字里的 `take` 就是这个提示。
 
 `take_actors` 同样是「取走」：用 `std::mem::take` 把 `actors` 搬空、交给调用方去 `start()`。Ch3.3 会在这个接缝之上封装出 `graph.start()`——本章先把接缝露出来，好让测试**手动**把每个 actor `start()` 起来，先把「接线对不对」这件最要紧的事验证掉，调度的封装往后放。
 
@@ -240,7 +245,7 @@ for h in handles { h.await.unwrap().unwrap(); }
 
 `1 + 2 == 3` 是**桥的验收**：喂给对外输入 `a` 的 `1` 必须准确落到节点的 `a` 端口、`b` 的 `2` 落到 `b` 端口，`op="+"` 必须真的被注入成了 `"+"`。三者任一接错，结果就不是 `3`。停机那几行也复用了 Part 1 的关闭语义：`drop` 掉手上两个 `Sender` 外加 `drop(g)`（连图内 `inputs` 表里那两份 `Sender` 一起丢），节点 `recv` 到 `ChannelClosed` 后由 `#[methods]` 的包装吞成「置标志 + 退出」，任务干净返回 `Ok`。
 
-**六条错误支线**逐一钉死 §6 的六个变体：`missing_main_graph_errors`（`main="nope"`）、`unknown_node_type_errors`（`ty="NoSuchNode"`）、`port_ref_to_missing_node_errors`（`"ghost:a"`）、`unknown_port_errors`（给 `add` 接一个不存在的 `z` 端口）、`unconnected_port_errors`（只接 `a` 不接 `b`）、`missing_arg_errors`（不写 `op`）。每条都断言 `build()` 返回**对应的那一个** `Error` 变体——这既验证了「会报错」，也验证了「报得准」。
+**错误与兼容性支线**检查入口、类型、端口引用、参数与空边界；未接线标量端口应建图成功。另用倒序输入与减法验证按名接线，用左信封的 `partial_id` 验证元信息来自正确输入。加法即使接反也得到相同结果，不能单独证明位置映射正确。
 
 至此 flow-rs 全套 **46 项测试**（含 flow-derive 的宏单测）全绿，clippy `-D warnings` 干净。
 
@@ -250,7 +255,7 @@ for h in handles { h.await.unwrap().unwrap(); }
 - **第一跨（名字→位置）**：注册条目带上 `INPUTS`/`OUTPUTS` 端口名表，由 `#[derive(BuildFromPorts)]` 在字段遍历里**与填充顺序同序**地收集。Builder 按名表把「按名收集的 channel」排成「按位置的 `Vec`」，接反被消灭。
 - **第二跨（参数注入）**：构造器签名升级为 `build(&Args, ins, outs) -> Result`；宏为自有参数字段生成 `config::arg(args, "字段名")?`，按目标类型反序列化——「配置驱动」在构造侧落地。
 - **`assemble` 三段**：开 channel 收对外句柄 + 按 `PortRef` 把端口按名收进中间表 → 逐节点按注册表名表把中间表翻译成位置 `Vec` → `(ctor)` 造节点。`remove` 取一个少一个，剩余即非法端口。
-- **六个 `Error` 变体**把跨引用校验一次性落在 `build()`：`MainGraphNotFound`/`UnknownNodeType`/`UnknownNode`/`UnknownPort`/`PortNotConnected`/`Arg`——配置错误在建图当场、以人话报出，正是相对原版「校验前移」的价值。
+- **分清非法引用与未接线**：前者报错，后者保留默认端点。原版已有建图校验，完整类型推断等协议仍需继续补齐。
 - **`MainGraph` 最小 API**：`input`（clone Sender）/ `take_output`（move Receiver）/ `take_actors`，动词映射 channel 的多生产者-单消费者语义；调度封装留到 Ch3.3。
 
 下一章 **Ch3.3 · tokio 调度**：本章把节点装到了「能被 `start()`」的地步，但还得由调用方手动一个个 `start`、手动收 `JoinHandle`。Ch3.3 把这套封进 `graph.start()` / 优雅停机 / `handle.await`，让「装好的图」变成「跑起来、又能干净停下的图」——`MainGraph` 从一张静态蓝图，正式变成一台运转的机器。

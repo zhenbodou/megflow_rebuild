@@ -142,13 +142,13 @@ fn attach_receiver(node_ins, reg, node, port, rx) -> Result<()> {
 
 `attach_sender` 对称——标量输出重复接报错，数组输出（Bcast 扇出）可接多条。于是 `MERGE_GRAPH` 里两条对外输入都写 `ports=["mg:inps"]`、`BCAST_GRAPH` 里两条内部连接都从 `bc:out` 出发，装配器各自往 `inps`/`out` 的组里攒 channel 端，不再当成重复接线报错。
 
-逐节点构造时，「空组」的处置也随 arity 分岔：**标量端口空组 = 没接线 = `PortNotConnected`；数组端口空组 = 接了 0 条 = 合法**（一个 `Bcast` 允许暂时不接任何下游）：
+逐节点构造时，「空组」的处置也随 arity 分岔：**标量端口空组补一个默认端点；数组端口空组保留空数组**（一个 `Bcast` 允许暂时不接任何下游）：
 
 ```rust,ignore
 for &port in reg.inputs {
-    let group = ins_map.remove(port).unwrap_or_default();
+    let mut group = ins_map.remove(port).unwrap_or_default();
     if group.is_empty() && !reg.input_is_array(port) {
-        return Err(Error::PortNotConnected { node: nd.name.clone(), port: port.to_owned() });
+        group.push(Receiver::default());
     }
     ins.push(group); // 数组端口的空组原样入列——合法的「接了 0 条」
 }

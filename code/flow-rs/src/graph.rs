@@ -9,7 +9,7 @@
 //!
 //! **跨引用校验也在这里落地**（Ch3.1 承诺的「校验前移到 build()」）：`main` 指向的图
 //! 不存在、类型名查不到、端口引用指向不存在的节点、配置接了节点没有的端口、节点声明
-//! 的端口没接线——全部在 `build()` 当场 `Err`，而非等运行时 panic。
+//! 的端口未接线则保留默认端点（原版允许此情况），不作为建图错误。
 //!
 //! **Ch3.3 在装配之上加了调度层**：[`MainGraph::start`] 把每个装好的节点 spawn 成一个
 //! tokio 任务、收敛成一个覆盖全图的聚合句柄，[`MainGraph::stop`] 撤掉所有对外输入触发
@@ -202,6 +202,12 @@ impl MainGraph {
         // 对外**输出**：channel 的 Receiver 归用户，Sender 接到源节点的输出端口。
         // 多个源端口汇到同一对外输出（扇入）是 mpsc 天生支持的——clone Sender 即可。
         for pc in &g.outputs {
+            if pc.ports.is_empty() {
+                return Err(Error::BadConnection(format!(
+                    "graph output {:?} has no source",
+                    pc.name
+                )));
+            }
             let (tx, rx) = channel(pc.cap);
             outputs.insert(pc.name.clone(), rx);
             for pref_str in &pc.ports {
@@ -213,8 +219,8 @@ impl MainGraph {
 
         // 图**内部**连接（Ch4.1）：一条连接 = 一条 channel，方向由端点的端口角色推断。
         // 指向某节点**输出**端口的引用是发送端、指向**输入**端口的是接收端（判据就是
-        // Ch3.2 注册表里的 `inputs`/`outputs` 端口名表）。mpsc 单消费者要求一条连接恰有
-        // 1 个接收端、≥1 个发送端（扇入靠 clone Sender）；扇出到多个消费者需要 bcast 节点。
+        // Ch3.2 注册表里的 `inputs`/`outputs` 端口名表）。多个接收端竞争同一队列；
+        // 若每个消费者都要收到一份，应通过 bcast 接不同队列。
         for conn in &g.connections {
             // 先把这条连接上的每个端口引用按「角色」分成发送端 / 接收端两拨。
             let mut senders: Vec<PortRef> = Vec::new();
@@ -278,27 +284,21 @@ impl MainGraph {
             let mut outs_map = node_outs.remove(&nd.name).unwrap_or_default();
 
             // 按声明顺序把命名端口组排成位置分组 Vec——顺序即注册表 INPUTS/OUTPUTS，
-            // 与构造器填字段同序。每个端口 → 一组 channel 端：标量端口必须恰好接了 1 条
-            // （空组 → PortNotConnected），数组端口 0..N 条皆可（空组 = 没接，合法）。
+            // 与构造器填字段同序。未接线标量补默认端点，数组端口保留空组。
+            // 原版 conn_check 对断开端口仅警告，默认 Receiver 关闭、Sender 丢弃并成功。
             let mut ins: Vec<Vec<Receiver>> = Vec::with_capacity(reg.inputs.len());
             for &port in reg.inputs {
-                let group = ins_map.remove(port).unwrap_or_default();
+                let mut group = ins_map.remove(port).unwrap_or_default();
                 if group.is_empty() && !reg.input_is_array(port) {
-                    return Err(Error::PortNotConnected {
-                        node: nd.name.clone(),
-                        port: port.to_owned(),
-                    });
+                    group.push(Default::default());
                 }
                 ins.push(group);
             }
             let mut outs: Vec<Vec<Sender>> = Vec::with_capacity(reg.outputs.len());
             for &port in reg.outputs {
-                let group = outs_map.remove(port).unwrap_or_default();
+                let mut group = outs_map.remove(port).unwrap_or_default();
                 if group.is_empty() && !reg.output_is_array(port) {
-                    return Err(Error::PortNotConnected {
-                        node: nd.name.clone(),
-                        port: port.to_owned(),
-                    });
+                    group.push(Default::default());
                 }
                 outs.push(group);
             }
@@ -350,8 +350,8 @@ impl MainGraph {
         self.inputs.get(name).cloned()
     }
 
-    /// 取走一个对外输出的接收端（`Receiver` 单消费者，只能 move 出来）。找不到 → `None`。
-    /// Move out an external output's receiver (single-consumer).
+    /// 取走并移除图持有的输出接收端。调用者可以克隆接收端，克隆之间竞争消息。
+    /// Remove and return the graph's retained receiver.
     pub fn take_output(&mut self, name: &str) -> Option<Receiver> {
         self.outputs.remove(name)
     }
