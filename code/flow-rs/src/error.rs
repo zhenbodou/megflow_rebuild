@@ -11,6 +11,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("template type inference failed")]
+    TemplateInferFault,
+    #[error("node type is not match")]
+    ChannelTypeMismatch,
     /// 通道已关闭（对端全部 drop）。/ channel closed (all peers dropped).
     #[error("channel closed")]
     ChannelClosed,

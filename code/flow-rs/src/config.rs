@@ -16,6 +16,8 @@
 //! Graph-config layer: deserialize the pinned TOML schema into typed structs.
 //! Pure `text → structs`; cross-reference validation lives in `build()` (Ch3.2).
 
+pub mod interlayer;
+
 use crate::error::{Error, Result};
 use serde::{de::DeserializeOwned, Deserialize};
 

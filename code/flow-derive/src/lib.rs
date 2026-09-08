@@ -159,3 +159,13 @@ mod tests {
         assert!(out.contains("\"Bar\""));
     }
 }
+
+mod conversion;
+
+/// 将同步 Rust 载荷转换函数登记到引擎转换表，自动保留信封元信息。
+#[proc_macro_attribute]
+pub fn add_cvt_func(args: TokenStream, item: TokenStream) -> TokenStream {
+    let function = parse_macro_input!(item as syn::ItemFn);
+    conversion::expand(args.into(), function)
+        .unwrap_or_else(syn::Error::into_compile_error).into()
+}

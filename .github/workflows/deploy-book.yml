@@ -63,8 +63,16 @@ jobs:
       - name: Validate runnable macro course and checkpoints
         run: python3 scripts/check_macro_course.py
 
+      - name: Validate subgraph teaching example
+        run: cargo run --manifest-path code/Cargo.toml -p flow-rs --example subgraph_steps --locked
+
       - name: Build book
         run: mdbook build book
+
+      - name: Validate book navigation and local assets
+        run: |
+          python3 scripts/test_book_links.py
+          python3 scripts/check_book_links.py
 
       - name: Setup Pages
         id: pages

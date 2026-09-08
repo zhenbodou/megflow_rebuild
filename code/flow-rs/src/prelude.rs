@@ -34,12 +34,12 @@ pub use crate::envelope::{
 // 派生宏 TypeName/Node/Actor/BuildFromPorts、属性宏 inputs/outputs/methods、函数式宏
 // node_register!/resource_register!——写节点 / 写资源要用到的全部宏。
 pub use flow_derive::{
-    inputs, methods, node_register, outputs, resource_register, Actor, BuildFromPorts, Node,
+    add_cvt_func, inputs, methods, node_register, outputs, resource_register, Actor, BuildFromPorts, Node,
     TypeName,
 };
 
 // ── 引擎类型与函数 ────────────────────────────────────────────────────────
-pub use crate::channel::{channel, BatchRecvError, Receiver, ReceiverT, Sender, SenderT};
+pub use crate::channel::{channel, BatchRecvError, Receiver, ReceiverT, Sender, SenderT, TypeInfo};
 pub use crate::config::Args; // 资源作者写 `BuildResource::build(args: &Args)` 时要命名它。
 pub use crate::context::Context;
 pub use crate::error::{Error, Result};

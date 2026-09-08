@@ -17,6 +17,10 @@
 - [Ch1.3 实现 Envelope 消息信封与类型擦除消息层](part1/ch03-envelope.md)
 - [Ch1.4 async/await、Future、tokio 入门 → channel 封装](part1/ch04-async-channel.md)
 - [Ch1.4a 异步三步实验：Future、背压与关闭](part1/ch04a-async-workshop.md)
+- [Ch1.4b 通道协议：容量、批量、限时与竞争接收](part1/ch04b-channel-protocols.md)
+- [Ch1.4c 类型化与默认端点](part1/ch04c-typed-endpoints.md)
+- [Ch1.4d 类型信息与转换表](part1/ch04d-type-conversion.md)
+- [Ch1.4e 取消、超时与任务错误](part1/ch04e-cancellation-errors.md)
 
 # 独立专题 · Rust 宏：从入门到专家实践
 
@@ -46,6 +50,7 @@
 - [Ch3.1 serde / toml 与图 TOML schema → 配置解析层](part3/ch01-config.md)
 - [Ch3.1a 配置实作：解析成功之后，还缺什么](part3/ch01a-config-workshop.md)
 - [Ch3.2 Graph Builder：装配节点与 channel](part3/ch02-graph-builder.md)
+- [Ch3.2a 接线实作：把名字变成真实端点](part3/ch02a-wiring-workshop.md)
 - [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机](part3/ch03-scheduler.md)
 - [Ch3.4 端到端跑通 BinaryOp（大里程碑）+ Sandbox 测试框架](part3/ch04-binaryop-e2e.md)
 
@@ -55,6 +60,7 @@
 - [Ch4.2 数组端口与广播/汇聚：Bcast / Merge（扇出与扇入）](part4/ch02-array-ports-bcast-merge.md)
 - [Ch4.3 Resource 与 Context：共享模型 / 内存池](part4/ch03-resource-context.md)
 - [Ch4.4 子图 subgraph、多图 graphs、动态子图](part4/ch04-subgraph.md)
+- [Ch4.4a 子图实作：亲手追踪递归展开](part4/ch04a-subgraph-workshop.md)
 - [Ch4.5 Reorder：恢复连续序列与原版对照](part4/ch05-reorder.md)
 
 # 第 5 部分 · 兼容 · 优化 · 收尾

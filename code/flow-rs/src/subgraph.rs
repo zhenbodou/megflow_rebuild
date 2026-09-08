@@ -6,21 +6,12 @@
 //! `graph_names.contains(&ty)` 的自动识别一致）。于是「一个模型喂 N 条同构支路」这种真实
 //! 拓扑，可以把那条支路写成**一张子图**、在主图里实例化 N 份。
 //!
-//! # 为什么是「内联展开」而非原版的「嵌套运行时」
+//! # 当前实现与完整目标的差距
 //!
-//! 原版把 `Graph` 也实现成一个 `Node`（嵌套运行时单元）：子图是个独立的、递归运行的运行时，
-//! 父调度器只管调度一批 `Box<dyn Actor>`，其中某些恰好是 `Graph`。它靠**构造后注入通道**
-//! （`set_port`）把父子图的边界端口对接起来——这套在原版里最省事，因为原版的端口信息本就是
-//! **运行期**计算的、通道是构造后注入的。
-//!
-//! **但我们这版重写的装配模型完全不同**：节点在**构造时**就把 channel 作为构造器参数拿走
-//! （`NodeCtor(&Args, Vec<Vec<Receiver>>, Vec<Vec<Sender>>)`，见 Ch3.2/4.2），端口名表是
-//! **编译期** `&'static`（注册表）。这版里根本没有「构造后 `set_port` 注入」这一步，子图也
-//! 套不进「一个编译期注册的节点」的模子。于是对**我们的架构**，最省事的选择反了过来：**在
-//! 装配之前先把多图压平成一张扁平图**（本模块），之后 Ch3.2 的 `assemble` **一行不改**地跑。
-//! 这又是一次「架构决定设计」——与 Ch4.3「需求决定抽象」同气：同一个问题（子图对接），因
-//! 底层接线架构不同，最省事的解法正好相反。（动态子图——运行期按流的个数生成 N 份实例——
-//! 确实需要嵌套运行时，故划在本教学子集之外，见章末「诚实的边界」。）
+//! 当前通过静态压平复用已有构造器接线流程，只是开发中的中间阶段。
+//! 原版 Graph 本身参与节点运行时，并有 set_port、动态实例及资源作用域等协议。
+//! 这些仍属于完整 Rust 重构的必做内容，不能因当前架构未支持而划出教学范围。
+//! 子图边界容量、生命周期、子图资源与实例参数不能仅凭叶子消息结果相同就视为等价。
 //!
 //! # 压平做什么
 //!
@@ -110,6 +101,17 @@ fn expand(
         return Err(Error::SubgraphCycle(g.name.clone()));
     }
     ancestors.push(g.name.clone());
+
+    // 在穿透边界之前检查，否则未被父图引用的空边界会在压平时静默消失。
+    // 原版 translate_graph 对 inputs/outputs 都调用 translate_conn，拒绝空 ports。
+    for port in g.inputs.iter().chain(&g.outputs) {
+        if port.ports.is_empty() {
+            return Err(Error::BadConnection(format!(
+                "graph {:?} boundary {:?} has no endpoint",
+                g.name, port.name
+            )));
+        }
+    }
 
     // 节点：ty 是图名 → 子图引用，递归展开（前缀追加 `节点名/`）；否则叶子，带前缀原样收下。
     for nd in &g.nodes {
@@ -405,6 +407,25 @@ connections = [{cap=8, ports=["s:nosuchport", "k:inp"]}]
             matches!(err, Error::UnknownPort { ref node, ref port } if node == "s" && port == "nosuchport"),
             "实际：{err:?}"
         );
+    }
+
+    #[test]
+    fn unused_empty_subgraph_boundary_is_not_silently_erased() {
+        for direction in ["inputs", "outputs"] {
+            let text = format!(
+                r#"
+main="top"
+[[graphs]]
+name="Sub"
+{direction}=[{{name="unused",cap=8,ports=[]}}]
+[[graphs]]
+name="top"
+nodes=[{{name="s",ty="Sub"}}]
+"#
+            );
+            let config = Config::from_toml(&text).unwrap();
+            assert!(matches!(flatten(&config), Err(Error::BadConnection(_))));
+        }
     }
 
     /// `main` 指向不存在的图 → `MainGraphNotFound`（与既有 assemble 行为同变体）。

@@ -166,3 +166,153 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_node --locked
 这只是具体 Rust 类型的标量端口。原版 T0 模板变量、`name:[T]` 数组、字典与 dyn
 端口的信息表和生命周期尚未完整移植。当前对数组/动态形式明确报未支持诊断，不把
 它们误认为标量载荷。旧 `name[]` 教学数组语法暂时保留。
+
+## 毕业实作补充：`#[add_cvt_func]` 转换注册宏
+
+前面已实现节点宏，现在用一个真实框架需求检验你能否自己设计属性宏：用户只想写 `Count → Label` 的业务函数，引擎却需要 `SealedEnvelope → SealedEnvelope` 的函数指针，并要知道源、目标类型。
+
+### 1. 先写用户希望使用的代码
+
+```rust,ignore
+#[derive(Clone)]
+struct Count(u32);
+#[derive(Clone)]
+struct Label(String);
+
+#[add_cvt_func]
+fn label(Count(value): Count) -> Label {
+    Label(format!("frame-{value}"))
+}
+```
+
+这里的 `Count(value)` 是函数参数模式，不是类型。解析函数时应从 `FnArg::Typed` 的 `ty` 取 Count，不能把整个参数转换成字符串再截取。原函数仍应可以通过 `label(Count(3))` 直接调用。
+
+### 2. 手写宏应生成的适配器
+
+输入是一个已封箱的信封。按顺序做四件事：
+
+```rust,ignore
+let envelope = envelope.downcast_mut::<Envelope<Count>>()
+    .expect("type error in convert function label");
+let input = envelope.unpack();
+let result = label(input);
+envelope.repack(result).seal()
+```
+
+`unpack()` 取走载荷，信封对象还保留元信息。`repack` 用目标载荷构造新信封，并保留这些元信息。若改用 `Envelope::new(result)`，结果文字可能正确，但序号、权重和地址会丢失。
+
+适配器没有捕获环境，因此它的闭包可以转换为普通函数指针 `CvtF`。输入和输出在外部看起来都是 SealedEnvelope，转换逻辑内部才知道具体载荷类型。
+
+### 3. 再把类型写进登记项
+
+运行时增加 `ConversionRegistration`：保存取得源类型标识的函数、取得目标类型标识的函数，以及上面的信封适配器。
+
+为什么类型标识也用函数？静态登记发生时只保存函数指针，等到初始化转换表时再调用 `MsgTypeId::of::<Count>`。这样将静态登记数据与运行时类型标识取得分开，无需在宏执行时尝试查询用户类型的 TypeId。
+
+在 `flow-derive/src/conversion.rs`，使用 `syn::ItemFn` 解析函数，读取 `sig.inputs`、`sig.output` 和 `sig.ident`；`quote!` 输出原来的完整 ItemFn，以及一个匿名 const 作用域内的 inventory 登记。匿名作用域避免为每个转换器额外生成可能冲突的固定函数名。生成路径使用 `::flow_rs::...`，由引擎重导出 inventory，用户不需要自己声明这个依赖。
+
+当前实现不支持依赖改名后的路径自动发现；这种工程化要求仍需按宏专题第 7、9 课继续验证和实现。
+
+### 4. 检查错误签名，而不是等生成代码碰巧报错
+
+当前宏要求一个参数、显式返回类型、安全同步 Rust 函数，不接受泛型、async 或外部 ABI。这是因为登记项需要一份已经确定输入/输出类型的同步函数。生成器返回带 span 的 `syn::Error`，入口把它转换成 `compile_error!`。
+
+Rust 类型从签名取得；属性参数解析现已支持原版的空参数、下划线占位及字符串提示写法。字符串提示在 Rust 分支不改变类型标识。Python 类型的特殊识别与执行适配尚未实现，不能据此宣称 Python 转换已支持。
+
+传入参数是否满足 `'static`、输出是否满足 Clone/Send 等要求仍由下游编译约束检查。当前单元测试覆盖几种非法签名，尚不替代完整 trybuild 诊断快照和 cfg 属性组合测试。
+
+### 5. 运行真正的下游验证
+
+```sh
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test conversion_macro --locked
+```
+
+测试没有手动调用初始化或注册函数。它用属性登记 Count → Label，发送 Count(7)，收到 Label("frame-7")，并断言 `partial_id=42`、`weight=3` 保留。测试还直接调用原函数，证明宏没有把用户函数变成只能由框架使用的特殊入口。
+
+本重构先用 inventory 收集静态登记，在转换表首次访问时通过 LazyLock 建表；原版使用 ctor 在初始化期间调用注册函数。当前普通静态转换可以使用，但动态库加载时机和重复静态登记的执行顺序尚未证明等价。不要注册多个相同类型对并依赖哪个属性函数最后生效；显式 `add_cvt_func_impl` 的后写覆盖规则另有测试。
+
+完成后独立添加反向函数 Label → Count。先决定字符串解析失败如何表达：当前 CvtF 返回信封而不是 Result，不能直接在业务函数返回 Err 后仍假装目标是 Count。返回类型改变，登记的目标类型也随之改变。这道练习检验你是否理解“函数签名就是转换契约”。
+
+### 属性组合进阶：函数不存在时，登记也必须不存在
+
+属性宏往往生成多个 item。用户给函数写 `#[cfg(...)]`，实际想控制的是整个功能，而不仅是展开结果里的第一项。因此转换宏必须让函数和登记代码共享存在条件。
+
+考虑这个输入：
+
+```rust,ignore
+#[add_cvt_func]
+#[cfg_attr(feature = "disabled", cfg(any()))]
+fn convert(value: Input) -> Output { /* ... */ }
+```
+
+`cfg(any())` 是永不满足的条件；当 disabled 条件成立时，函数不存在。如果生成的登记仍引用 convert，便出现“函数找不到”的错误。条件成立或不成立可能改变编译器交给宏的属性集合，因此只运行一份正常示例不足以验证属性组合。
+
+也不能简单复制所有属性。`#[inline]` 对函数有意义，贴在登记用的 const 上则不合适。当前生成器增加 `gate(meta)`，按 AST 递归筛选：
+
+1. 遇到 `cfg` 原样保留。
+2. 遇到 `cfg_attr`，先取第一个 Meta 作为条件，再递归处理后面的属性。
+3. 后面的属性若没有留下任何存在条件，整个 cfg_attr 不复制。
+4. 其他属性只留在原函数上。
+
+例如：
+
+```rust,ignore
+#[cfg_attr(feature = "x", inline, cfg_attr(unix, cfg(any()), allow(dead_code)))]
+```
+
+登记代码仅继承：
+
+```rust,ignore
+#[cfg_attr(feature = "x", cfg_attr(unix, cfg(any())))]
+```
+
+这不是字符串替换。`syn::Meta` 表示属性内容，`Punctuated<Meta, Token![,]>` 处理逗号分隔的内容，`parse_quote!` 重建筛选后的语法树。函数上的原属性完全保留，只有新生成的登记需要这份筛选副本。
+
+`gate` 返回 `Result<Option<Meta>>`：Err 表示属性语法不正确，None 表示这个属性不需要复制，Some 表示得到一个存在条件。收集时的 `transpose()` 将 `Result<Option<T>>` 变成 `Option<Result<T>>`，从而可以先通过 `filter_map` 忽略 None，再由 `collect::<Result<Vec<_>>>()` 保留错误。这行组合代码的意义是“忽略无需复制的属性，但不能吞掉解析错误”。
+
+测试分两层：生成器单测检查嵌套 cfg_attr 筛选后确实只剩存在条件；下游测试使用不存在的载荷类型定义禁用函数，确认禁用代码不泄漏，并验证带 inline 的启用函数仍能完成消息转换。下游测试无法独自证明筛选函数运行过，因为编译器可能先移除条件不成立的函数，所以两层都要保留。
+
+### 给初学者看的错误也要验收
+
+新增 `tests/ui/conversion_async.rs` 和 `conversion_missing_return.rs`，分别故意使用 async 和遗漏返回类型。对应 stderr 快照要求错误指向函数声明，说明需要同步函数或显式返回类型。执行：
+
+```sh
+cargo test --manifest-path code/Cargo.toml -p flow-derive --test ui --locked
+```
+
+维护者修改诊断后可以在审核输出的前提下更新快照；学习者日常运行不用设置 `TRYBUILD=overwrite`。不能为了让测试通过而直接接受一份看不懂的编译器内部错误。
+
+练习：给同一个转换函数加上 `#[cfg_attr(all(), inline)]` 与一个真实存在条件，画出应该作用于函数、应该作用于登记的两份属性列表。然后对照展开结果。这是从“会写 quote”走向“能维护供别人使用的宏”的必要步骤。
+
+
+### 参数解析实作：为什么 `(_, _)` 也要支持
+
+原版 `flow-derive/examples/cvt_func.rs` 既使用 `#[add_cvt_func]`，也使用
+`#[add_cvt_func(_, _)]`。重构若只接受无参数写法，就会拒绝原版合法 Rust 代码。
+兼容性要检查用户写下的 token，不能只比较宏最后生成的函数。
+
+解析器分两个槽位，分别对应源类型提示和目标类型提示。每个槽位可以为空、是 `_`，
+或是字符串字面量。`_` 的意思是此槽位不提供提示，并不是 Rust 类型通配符。
+在当前 Rust 函数转换中，实际身份始终由函数参数和返回类型决定：
+
+```rust,ignore
+#[add_cvt_func(_, _)]
+fn widen(value: u32) -> u64 { value as u64 }
+```
+
+展开仍登记 u32 → u64。即使提供字符串提示，也不能用它把 u32 重命名成别的 Rust 类型。
+这保留了原版 `type_id` 的 Rust 分支规则；Python 分支对提示有其他用途，不能混淆。
+
+实现位置是 `flow-derive/src/conversion.rs::CvtFnOption`，它实现 `syn::parse::Parse`。
+`ParseStream` 是一条可消费的 token 输入流，`peek(Token![_])` 只看下一个 token 而不取走；
+`parse::<Token![_]>()` 才将它消费。若不是下划线，就尝试读取 `LitStr`，数字等非法提示
+会在这里返回语法错误。读完两个槽位后，外层 `syn::parse2` 还要求没有剩余 token，
+因此第三个槽位不会被悄悄忽略。
+
+为保持原版边界，解析器也沿用它的可选逗号行为；本教程推荐明确写 `(_, _)`，
+不鼓励依赖省略分隔符的宽松形式。原版不接受两个槽位之后额外追加逗号，当前测试也保留这一点。
+如果将来希望扩展语法，应该先明确这是兼容性扩展，而不是无意中让解析结果变了。
+
+本次验证包含两类证据：生成器测试比较不同合法 Rust 参数写法的展开结果相同；
+下游转换测试实际使用 `(_, _)` 和字符串提示，确认登记、收发和元信息保留仍然有效。
+独立练习：增加非法第三槽位，观察错误是在参数解析阶段出现，而不是等消息发送才发现。

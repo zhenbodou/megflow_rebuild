@@ -1,6 +1,6 @@
 //! 类型化端点：固定端口载荷类型，仍共享类型擦除队列。
-//! 当前 From 转换不查询原版的 CVT_VTABLE；异类型自动转换尚未实现。
-use super::{BatchRecvError, Receiver, Sender};
+//! From 按方向查询转换表并缓存函数；不自动推导多步转换链。
+use super::{BatchRecvError, Receiver, Sender, TypeInfo};
 use crate::error::Result;
 use flow_message::Envelope;
 use std::{
@@ -26,12 +26,20 @@ impl<T> Default for ReceiverT<T> {
 }
 
 impl<T: 'static> From<Sender> for SenderT<T> {
-    fn from(sender: Sender) -> Self {
+    fn from(mut sender: Sender) -> Self {
+        sender.conversion = super::conversion::lookup(
+            crate::config::interlayer::MsgTypeId::of::<T>(),
+            sender.chan_tid(),
+        );
         Self(sender, PhantomData)
     }
 }
 impl<T: 'static> From<Receiver> for ReceiverT<T> {
-    fn from(receiver: Receiver) -> Self {
+    fn from(mut receiver: Receiver) -> Self {
+        receiver.conversion = super::conversion::lookup(
+            receiver.chan_tid(),
+            crate::config::interlayer::MsgTypeId::of::<T>(),
+        );
         Self(receiver, PhantomData)
     }
 }
@@ -79,5 +87,22 @@ impl<T: Send + Clone + 'static> ReceiverT<T> {
         duration: Duration,
     ) -> std::result::Result<Vec<Envelope<T>>, BatchRecvError<Envelope<T>>> {
         self.0.batch_recv::<T>(n, duration).await
+    }
+}
+
+impl<T: 'static> super::TypeInfo for SenderT<T> {
+    fn port_tid(&self) -> crate::config::interlayer::MsgTypeId {
+        crate::config::interlayer::MsgTypeId::of::<T>()
+    }
+    fn chan_tid(&self) -> crate::config::interlayer::MsgTypeId {
+        self.0.chan_tid()
+    }
+}
+impl<T: 'static> super::TypeInfo for ReceiverT<T> {
+    fn port_tid(&self) -> crate::config::interlayer::MsgTypeId {
+        crate::config::interlayer::MsgTypeId::of::<T>()
+    }
+    fn chan_tid(&self) -> crate::config::interlayer::MsgTypeId {
+        self.0.chan_tid()
     }
 }

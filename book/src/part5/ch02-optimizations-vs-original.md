@@ -32,8 +32,8 @@ pub enum Error {
     TypeMismatch { expected: &'static str, actual: &'static str },
     #[error("unknown node type: {0}")]
     UnknownNodeType(String),
-    #[error("port not connected: {0}")]
-    PortNotConnected(String),
+    #[error("bad connection: {0}")]
+    BadConnection(String),
     // …… Part 3/4 里按需长到十几个变体
 }
 ```
@@ -44,7 +44,7 @@ pub enum Error {
    ```rust,ignore
    match graph_build_result {
        Err(Error::UnknownNodeType(ty)) => // 提示用户拼错了节点名
-       Err(Error::PortNotConnected(p))  => // 提示某端口漏接
+       Err(Error::BadConnection(p))  => // 提示连接声明有误
        Err(e) => // 其它
    }
    ```
@@ -54,27 +54,18 @@ pub enum Error {
 
 **诚实标注**:`anyhow` 不是坏选择。对一个「错误绝大多数直接冒泡到顶层统一处理、且插件生态庞杂」的系统，`anyhow` 的省事是有道理的。我们的类型化路线之所以更划算，是因为它和下一条「校验前移」是一对——我们**想让**调用方在 `build()` 当场区分并处理每一种配置错误。用法不同，最优解就不同。
 
-## 3. 校验前移：运行期报错 → `build()` 期报错
+## 3. 配置校验：核对实际边界
 
-这是**最大的一条**，也是「生产环境里 bug 更少」最实打实的杠杆。
+原版已有配置校验：`config/mod.rs::translate_conn` 检查空连接、节点及端口引用，
+`config/postprocess/mod.rs::proc` 执行连接检查和类型推断。不能将这些能力描述成重构首次提供的优化。
 
-**原版**:一部分配置与接线问题（节点类型不存在、端口没接上、跨引用错位）要等到图**跑起来、数据流到那个节点**时才暴露。想象一条视频流管线，某个节点名在 TOML 里拼错了——如果这个错误要到运行期才报，它可能在服务跑了三个小时、处理到某一帧时才崩。
+当前重构的处理顺序是 TOML 解析 → 子图展开 → 装配。解析检查字段结构；展开检查递归引用；
+装配检查注册类型、端口引用、重复连接和构造参数。遇错通过 `?` 返回，不一次收集全部错误。
+通过这些检查也不代表已覆盖原版完整配置协议或保证运行时没有错误。
 
-**我们**（Ch3.1 起层层加码）:**整张拓扑在 `build()` 时一次性校验完**，一帧数据都还没流动，非法的图就已经被拒绝。分三层:
-
-```mermaid
-flowchart TD
-    A["TOML 文本"] -->|"serde: deny_unknown_fields + default"| B["第一层:未知键当场拒<br/>（Ch3.1 免费得到）"]
-    B -->|"Builder::build → assemble"| C["第二层:跨引用校验<br/>UnknownNodeType / UnknownNode /<br/>UnknownPort / PortNotConnected /<br/>UnknownResourceType（Ch3.2/4.3）"]
-    C -->|"subgraph::flatten"| D["第三层:子图校验<br/>SubgraphCycle / 边界端口存在（Ch4.4）"]
-    D --> E["一个合法、接线完整的图<br/>——此后才允许 start()"]
-```
-
-- **第一层**在解析期:`deny_unknown_fields` + `default`（Ch3.1）让 TOML 里一个拼错的键当场被拒，而不是被默默忽略。
-- **第二层**在装配期:Ch3.2 一口气给了 6 个错误变体，全部在 `build()` 里落地——节点类型未注册、引用了不存在的节点、端口没接上、端口重复接、参数缺失……Ch4.3 又补了资源类型未注册。
-- **第三层**在展开期:Ch4.4 的 `flatten` 在装配**前**查子图引用与边界端口、检测环。
-
-**结果**:一整类「配置错误在生产环境运行期才崩」的 bug 被消灭了。图要么在 `build()` 就以一个**具体、类型化**（见 §2）的错误失败，要么它此后跑起来就是接线完整的。**fail fast, fail at the boundary**——在边界上快速失败，是稳态系统的基本功。
+未接线标量端口按原版保留默认端点；数组端口保留空组。引用不存在的端口与未接线端口是两种情况。
+将原版允许的配置改成建图错误会破坏兼容性，不能以“更严格”代替行为对齐。
+接线顺序与默认端点的运行证据见 [接线实作](../part3/ch02a-wiring-workshop.md)。
 
 ## 4. `unsafe`：81 处 → 0 处
 
