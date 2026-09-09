@@ -1,6 +1,6 @@
 //! 类型化端点：固定端口载荷类型，仍共享类型擦除队列。
 //! From 按方向查询转换表并缓存函数；不自动推导多步转换链。
-use super::{BatchRecvError, Receiver, Sender, TypeInfo};
+use super::{BatchRecvError, Receiver, Sender};
 use crate::error::Result;
 use flow_message::Envelope;
 use std::{
@@ -27,19 +27,13 @@ impl<T> Default for ReceiverT<T> {
 
 impl<T: 'static> From<Sender> for SenderT<T> {
     fn from(mut sender: Sender) -> Self {
-        sender.conversion = super::conversion::lookup(
-            crate::config::interlayer::MsgTypeId::of::<T>(),
-            sender.chan_tid(),
-        );
+        sender.with_type(&crate::config::interlayer::MsgTypeId::of::<T>());
         Self(sender, PhantomData)
     }
 }
 impl<T: 'static> From<Receiver> for ReceiverT<T> {
     fn from(mut receiver: Receiver) -> Self {
-        receiver.conversion = super::conversion::lookup(
-            receiver.chan_tid(),
-            crate::config::interlayer::MsgTypeId::of::<T>(),
-        );
+        receiver.with_type(&crate::config::interlayer::MsgTypeId::of::<T>());
         Self(receiver, PhantomData)
     }
 }

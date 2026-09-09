@@ -71,14 +71,14 @@ pub fn methods(_args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// 派生宏 `#[derive(Node)]`：生成 `impl Node`（close / is_all_input_closed）。
-#[proc_macro_derive(Node)]
+#[proc_macro_derive(Node, attributes(port_template))]
 pub fn derive_node(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     node::expand_derive_node(&input).into()
 }
 
 /// 派生宏 `#[derive(Actor)]`：生成 `impl Actor`（三段式 start 循环）。
-#[proc_macro_derive(Actor)]
+#[proc_macro_derive(Actor, attributes(port_template))]
 pub fn derive_actor(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     node::expand_derive_actor(&input).into()
@@ -88,11 +88,11 @@ pub fn derive_actor(input: TokenStream) -> TokenStream {
 
 /// 派生宏 `#[derive(BuildFromPorts)]`：生成「从端口构造节点」的 `impl BuildFromPorts`。
 ///
-/// `attributes(state)` 声明它识别一个**惰性辅助属性** `#[state]`（Ch4.3）：被标注的字段
+/// `attributes(state, port_template)` 声明它识别一个**惰性辅助属性** `#[state]`（Ch4.3）：被标注的字段
 /// 不从 `args` 反序列化，而是 `Default::default()` 初始化——用于「运行期由 `initialize`
 /// 填入」的状态字段（如资源句柄 `Option<Arc<T>>`）。辅助属性本身不生成代码、也是**惰性**的
 /// （对其他宏透明），只是让 `#[derive(BuildFromPorts)]` 展开时能读到它、对该字段区别处理。
-#[proc_macro_derive(BuildFromPorts, attributes(state))]
+#[proc_macro_derive(BuildFromPorts, attributes(state, port_template))]
 pub fn derive_build_from_ports(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     node::expand_build_from_ports(&input).into()
@@ -167,5 +167,6 @@ mod conversion;
 pub fn add_cvt_func(args: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as syn::ItemFn);
     conversion::expand(args.into(), function)
-        .unwrap_or_else(syn::Error::into_compile_error).into()
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }

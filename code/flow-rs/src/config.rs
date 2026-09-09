@@ -17,6 +17,7 @@
 //! Pure `text → structs`; cross-reference validation lives in `build()` (Ch3.2).
 
 pub mod interlayer;
+pub(crate) mod type_infer;
 
 use crate::error::{Error, Result};
 use serde::{de::DeserializeOwned, Deserialize};
@@ -187,20 +188,21 @@ impl Config {
 pub struct PortRef<'a> {
     /// 节点实例名（`:` 左侧）。
     pub node: &'a str,
-    /// 端口名（`:` 右侧）。
+    /// 端口名（第一、第二个冒号之间；没有第二个冒号则取余下内容）。
     pub port: &'a str,
+    /// 可选地址标签，按原版 str2addr 规则转换。
+    pub tag: Option<u64>,
 }
 
 impl<'a> PortRef<'a> {
-    /// 解析 `"node:port"`。缺少 `:`、或任一侧为空 → `Err(Error::BadPortRef)`。
+    /// 解析 `"node:port[:tag]"`。缺少冒号或节点/端口名为空时报错。
     /// Parse `"node:port"`; missing colon or empty side → `BadPortRef`.
     pub fn parse(s: &'a str) -> Result<Self> {
-        match s.split_once(':') {
-            Some((node, port)) if !node.is_empty() && !port.is_empty() => {
-                Ok(PortRef { node, port })
-            }
-            _ => Err(Error::BadPortRef(s.to_owned())),
+        let ((node, port), tag) = interlayer::Port::parse(s)?;
+        if node.is_empty() || port.is_empty() {
+            return Err(Error::BadPortRef(s.to_owned()));
         }
+        Ok(PortRef { node, port, tag })
     }
 }
 

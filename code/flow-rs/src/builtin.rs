@@ -149,8 +149,8 @@ node_register!("NoopConsumer", NoopConsumer);
 ///
 /// A broadcast (fan-out) node: clones one input message to every sender in its array
 /// output port. Clone-to-all-but-last, move-into-last; send errors are swallowed.
-#[inputs(inp)]
-#[outputs(out[])]
+#[inputs(inp: T0)]
+#[outputs(out: [T0])]
 #[derive(Node, Actor, BuildFromPorts)]
 pub struct Bcast {}
 
@@ -196,8 +196,8 @@ node_register!("Bcast", Bcast);
 ///
 /// A merge (fan-in) node: races independent input receivers via `select_ok`, forwarding
 /// the first ready message; skips closed receivers until one is ready or all are closed.
-#[inputs(inps[])]
-#[outputs(out)]
+#[inputs(inps: [T0])]
+#[outputs(out: T0)]
 #[derive(Node, Actor, BuildFromPorts)]
 pub struct Merge {}
 
@@ -386,3 +386,26 @@ impl Reorder {
 
 node_register!("Reorder", Reorder);
 // ANCHOR_END: reorder
+
+// ANCHOR: static_demux
+/// 静态地址分流：保留原版 inp:T0 / out:{T0} 的模板关联。
+#[inputs(inp: T0)]
+#[outputs(out: {T0})]
+#[derive(Default, Node, Actor, BuildFromPorts)]
+pub struct Demux {}
+#[methods]
+impl Demux {
+    async fn exec(&mut self) -> Result<()> {
+        let message = self.inp.recv_any().await?;
+        let address = message
+            .info()
+            .to_addr
+            .expect("the envelope has no destination address");
+        if let Some(output) = self.out.get(&address) {
+            output.send_any(message).await.ok();
+        }
+        Ok(())
+    }
+}
+node_register!("Demux", Demux);
+// ANCHOR_END: static_demux

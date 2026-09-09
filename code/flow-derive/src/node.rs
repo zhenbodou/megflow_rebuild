@@ -69,12 +69,49 @@ fn wrapped_type<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
 enum PortKind {
     Input,
     InputArray,
+    InputDict,
     Output,
     TypedOutput,
     OutputArray,
+    OutputDict,
+}
+
+fn dict_value(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else { return None };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != "HashMap" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    if args.args.len() != 2 {
+        return None;
+    }
+    let syn::GenericArgument::Type(key) = &args.args[0] else {
+        return None;
+    };
+    if !type_is(key, "u64") {
+        return None;
+    }
+    match &args.args[1] {
+        syn::GenericArgument::Type(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn port_kind(ty: &Type) -> Option<PortKind> {
+    if let Some(value) = dict_value(ty) {
+        if type_is(value, "Receiver") || wrapped_type(value, "ReceiverT").is_some() {
+            return Some(PortKind::InputDict);
+        }
+        if type_is(value, "Sender") || wrapped_type(value, "SenderT").is_some() {
+            return Some(PortKind::OutputDict);
+        }
+    }
     if type_is(ty, "Receiver") || wrapped_type(ty, "ReceiverT").is_some() {
         return Some(PortKind::Input);
     }
@@ -85,10 +122,54 @@ fn port_kind(ty: &Type) -> Option<PortKind> {
         return Some(PortKind::Output);
     }
     match wrapped_type(ty, "Vec") {
-        Some(inner) if type_is(inner, "Receiver") => Some(PortKind::InputArray),
-        Some(inner) if type_is(inner, "Sender") => Some(PortKind::OutputArray),
+        Some(inner) if type_is(inner, "Receiver") || wrapped_type(inner, "ReceiverT").is_some() => {
+            Some(PortKind::InputArray)
+        }
+        Some(inner) if type_is(inner, "Sender") || wrapped_type(inner, "SenderT").is_some() => {
+            Some(PortKind::OutputArray)
+        }
         _ => None,
     }
+}
+
+/// 模板只接受单段、无泛型实参的 T + usize；不能误认 module::T0。
+fn template_index(ty: &Type) -> Option<usize> {
+    let Type::Path(path) = ty else { return None };
+    if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    let segment = &path.path.segments[0];
+    if !segment.arguments.is_empty() {
+        return None;
+    }
+    segment.ident.to_string().strip_prefix('T')?.parse().ok()
+}
+
+fn port_field(spec: &PortSpec, ty: Type) -> Field {
+    let mut field = named_field(spec.name.clone(), ty);
+    if let Some(index) = spec.payload.as_ref().and_then(template_index) {
+        field.attrs.push(parse_quote!(#[port_template(#index)]));
+    }
+    field
+}
+
+fn field_message_type(field: &Field) -> syn::Result<TokenStream2> {
+    let mut template = None;
+    for attribute in &field.attrs {
+        if attribute.path().is_ident("port_template") {
+            if template.is_some() {
+                return Err(syn::Error::new_spanned(attribute, "重复的 port_template"));
+            }
+            let index = attribute
+                .parse_args::<syn::LitInt>()?
+                .base10_parse::<usize>()?;
+            template = Some(index);
+        }
+    }
+    Ok(match template {
+        Some(index) => quote!(flow_rs::config::interlayer::MsgTypeId::Template(#index)),
+        None => message_type(&field.ty),
+    })
 }
 
 /// 一个端口声明：端口名 + 是否为**数组端口**（名字后跟 `[]`）。
@@ -96,14 +177,14 @@ fn port_kind(ty: &Type) -> Option<PortKind> {
 /// `#[inputs(inp, inps[])]` 解析成 `[PortSpec{inp, array:false}, PortSpec{inps, array:true}]`。
 /// 标量端口一个名字对应**一条** channel 端；数组端口一个名字对应**一组** channel 端
 /// （`Vec<Receiver>` / `Vec<Sender>`）——这是扇入（Merge）/ 扇出（Bcast）的地基（Ch4.2）。
-/// 语法上我们用**裸的空方括号** `name[]`；原版写作 `name:[T0]`（带每端口类型变量），但重写
-/// 版的 channel 在字段层是**未类型化**的（都搬 `SealedEnvelope`），无需那套类型变量机制，
-/// 故取更简的写法（空方括号表示端口组，不表示数组长度）。
+/// 早期 `name[]` 语法暂时保留；字典支持 `name:{}` 和 `name:{RustType}`。
+/// 原版列表语法与 T0 模板已接入；动态端口协议仍需继续实现。
 pub struct PortSpec {
     /// 端口名（注入结构体的字段名，也是注册表端口名表里的名字）。
     pub name: Ident,
     /// 是否数组端口（名字后带 `[]`）。
     pub array: bool,
+    pub dict: bool,
     pub payload: Option<Type>,
 }
 
@@ -112,6 +193,42 @@ impl Parse for PortSpec {
         let name: Ident = input.parse()?;
         if input.peek(Token![:]) {
             input.parse::<Token![:]>()?;
+            if input.peek(syn::token::Bracket) {
+                let content;
+                syn::bracketed!(content in input);
+                let payload = if content.is_empty() {
+                    None
+                } else {
+                    Some(content.parse::<Type>()?)
+                };
+                if !content.is_empty() {
+                    return Err(content.error("列表端口内只能声明一个消息类型，不支持数组长度"));
+                }
+                return Ok(PortSpec {
+                    name,
+                    array: true,
+                    dict: false,
+                    payload,
+                });
+            }
+            if input.peek(syn::token::Brace) {
+                let content;
+                syn::braced!(content in input);
+                let payload = if content.is_empty() {
+                    None
+                } else {
+                    Some(content.parse::<Type>()?)
+                };
+                if !content.is_empty() {
+                    return Err(content.error("字典端口内只能声明一个消息类型"));
+                }
+                return Ok(PortSpec {
+                    name,
+                    array: false,
+                    dict: true,
+                    payload,
+                });
+            }
             let payload: Type = input.parse()?;
             if matches!(
                 payload,
@@ -125,6 +242,7 @@ impl Parse for PortSpec {
             return Ok(PortSpec {
                 name,
                 array: false,
+                dict: false,
                 payload: Some(payload),
             });
         }
@@ -140,6 +258,7 @@ impl Parse for PortSpec {
         Ok(PortSpec {
             name,
             array,
+            dict: false,
             payload: None,
         })
     }
@@ -173,15 +292,31 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
             }
         }
         for spec in specs {
+            let concrete_payload = spec
+                .payload
+                .as_ref()
+                .filter(|ty| template_index(ty).is_none());
             // 数组端口 → Vec<Receiver>（一名多端，扇入）；标量端口 → 单个 Receiver。
-            let ty: Type = if let Some(payload) = &spec.payload {
+            let ty: Type = if spec.array {
+                let endpoint: Type = match concrete_payload {
+                    Some(payload) => parse_quote!(flow_rs::channel::ReceiverT<#payload>),
+                    None => parse_quote!(flow_rs::channel::Receiver),
+                };
+                parse_quote!(Vec<#endpoint>)
+            } else if spec.dict {
+                let endpoint: Type = match concrete_payload {
+                    Some(payload) => parse_quote!(flow_rs::channel::ReceiverT<#payload>),
+                    None => parse_quote!(flow_rs::channel::Receiver),
+                };
+                parse_quote!(std::collections::HashMap<u64, #endpoint>)
+            } else if let Some(payload) = concrete_payload {
                 parse_quote!(flow_rs::channel::ReceiverT<#payload>)
             } else if spec.array {
                 parse_quote!(Vec<Receiver>)
             } else {
                 parse_quote!(Receiver)
             };
-            named.named.push(named_field(spec.name.clone(), ty));
+            named.named.push(port_field(spec, ty));
         }
         if named
             .named
@@ -226,15 +361,31 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
             }
         }
         for spec in specs {
+            let concrete_payload = spec
+                .payload
+                .as_ref()
+                .filter(|ty| template_index(ty).is_none());
             // 数组端口 → Vec<Sender>（一名多端，扇出）；标量端口 → Option<Sender>。
-            let ty: Type = if let Some(payload) = &spec.payload {
+            let ty: Type = if spec.array {
+                let endpoint: Type = match concrete_payload {
+                    Some(payload) => parse_quote!(flow_rs::channel::SenderT<#payload>),
+                    None => parse_quote!(flow_rs::channel::Sender),
+                };
+                parse_quote!(Vec<#endpoint>)
+            } else if spec.dict {
+                let endpoint: Type = match concrete_payload {
+                    Some(payload) => parse_quote!(flow_rs::channel::SenderT<#payload>),
+                    None => parse_quote!(flow_rs::channel::Sender),
+                };
+                parse_quote!(std::collections::HashMap<u64, #endpoint>)
+            } else if let Some(payload) = concrete_payload {
                 parse_quote!(flow_rs::channel::SenderT<#payload>)
             } else if spec.array {
                 parse_quote!(Vec<Sender>)
             } else {
                 parse_quote!(Option<Sender>)
             };
-            named.named.push(named_field(spec.name.clone(), ty));
+            named.named.push(port_field(spec, ty));
         }
     }
     quote! { #item }
@@ -258,6 +409,7 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
                     Some(PortKind::Output) => outs.push((id.clone(), PortKind::Output)),
                     Some(PortKind::TypedOutput) => outs.push((id.clone(), PortKind::TypedOutput)),
                     Some(PortKind::OutputArray) => outs.push((id.clone(), PortKind::OutputArray)),
+                    Some(PortKind::OutputDict) => outs.push((id.clone(), PortKind::OutputDict)),
                     _ => {}
                 }
             }
@@ -279,7 +431,7 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
     let closes = output_fields(input).into_iter().map(|(id, kind)| {
         if kind == PortKind::TypedOutput {
             quote! { self.#id = Default::default(); }
-        } else if kind == PortKind::OutputArray {
+        } else if matches!(kind, PortKind::OutputArray | PortKind::OutputDict) {
             quote! { self.#id.clear(); } // 数组输出：清空 Vec → drop 掉每个 Sender
         } else {
             quote! { self.#id = None; } // 标量输出：置 None → drop 掉 Sender
@@ -418,6 +570,9 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
 /// 使用处 `use`）；新引入的 `Args`/`arg` 用**绝对路径** `flow_rs::config::..`，免得再逼
 /// 使用处多写两个 `use`（与 `node_register!` 的绝对路径策略一致）。
 fn message_type(ty: &Type) -> TokenStream2 {
+    let ty = dict_value(ty)
+        .or_else(|| wrapped_type(ty, "Vec"))
+        .unwrap_or(ty);
     match wrapped_type(ty, "ReceiverT").or_else(|| wrapped_type(ty, "SenderT")) {
         Some(payload) => quote!(flow_rs::config::interlayer::MsgTypeId::of::<#payload>()),
         None => quote!(flow_rs::config::interlayer::MsgTypeId::Any),
@@ -433,6 +588,10 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     let mut output_names: Vec<LitStr> = Vec::new();
     let mut input_array: Vec<bool> = Vec::new();
     let mut output_array: Vec<bool> = Vec::new();
+    let mut input_dict = Vec::new();
+    let mut output_dict = Vec::new();
+    let mut tagged_inits = Vec::new();
+    let mut has_dict = false;
     let mut input_types = Vec::new();
     let mut output_types = Vec::new();
     if let Data::Struct(data) = &input.data {
@@ -447,29 +606,44 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 quote! { Default::default() }
             } else if matches!(
                 port_kind(&f.ty),
-                Some(PortKind::Output | PortKind::TypedOutput | PortKind::OutputArray)
+                Some(
+                    PortKind::Output
+                        | PortKind::TypedOutput
+                        | PortKind::OutputArray
+                        | PortKind::OutputDict
+                )
             ) {
                 let is_array = port_kind(&f.ty) == Some(PortKind::OutputArray);
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
-                output_types.push(message_type(&f.ty));
+                output_dict.push(port_kind(&f.ty) == Some(PortKind::OutputDict));
+                output_types.push(match field_message_type(f) {
+                    Ok(ty) => ty,
+                    Err(error) => return error.to_compile_error(),
+                });
                 if port_kind(&f.ty) == Some(PortKind::TypedOutput) {
                     quote! { outs.remove(0).remove(0).into() }
                 } else if is_array {
-                    quote! { outs.remove(0) } // 数组输出：整组 Vec<Sender> 搬走
+                    quote! { outs.remove(0).into_iter().map(Into::into).collect() }
+                // 数组输出：整组 Vec<Sender> 搬走
                 } else {
                     quote! { Some(outs.remove(0).remove(0)) } // 标量：取组里唯一的 Sender
                 }
             } else if matches!(
                 port_kind(&f.ty),
-                Some(PortKind::Input | PortKind::InputArray)
+                Some(PortKind::Input | PortKind::InputArray | PortKind::InputDict)
             ) {
                 let is_array = port_kind(&f.ty) == Some(PortKind::InputArray);
                 input_names.push(LitStr::new(&id.to_string(), id.span()));
                 input_array.push(is_array);
-                input_types.push(message_type(&f.ty));
+                input_dict.push(port_kind(&f.ty) == Some(PortKind::InputDict));
+                input_types.push(match field_message_type(f) {
+                    Ok(ty) => ty,
+                    Err(error) => return error.to_compile_error(),
+                });
                 if is_array {
-                    quote! { ins.remove(0) } // 数组输入：整组 Vec<Receiver> 搬走
+                    quote! { ins.remove(0).into_iter().map(Into::into).collect() }
+                // 数组输入：整组 Vec<Receiver> 搬走
                 } else {
                     quote! { ins.remove(0).remove(0).into() } // 标量：取组里唯一的 Receiver
                 }
@@ -480,9 +654,60 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 let key = LitStr::new(&id.to_string(), id.span());
                 quote! { flow_rs::config::arg(args, #key)? }
             };
+            let kind = if is_state { None } else { port_kind(&f.ty) };
+            let tagged = match kind {
+                Some(PortKind::InputDict | PortKind::OutputDict) => {
+                    has_dict = true;
+                    let group = if kind == Some(PortKind::InputDict) {
+                        quote!(ins)
+                    } else {
+                        quote!(outs)
+                    };
+                    quote! { #group.remove(0).into_iter().map(|p| (p.tag.expect("dict port need a tag"), p.endpoint.into())).collect() }
+                }
+                Some(PortKind::Input) => quote!(ins.remove(0).remove(0).endpoint.into()),
+                Some(PortKind::TypedOutput) => quote!(outs.remove(0).remove(0).endpoint.into()),
+                Some(PortKind::Output) => quote!(Some(outs.remove(0).remove(0).endpoint)),
+                Some(PortKind::InputArray) => {
+                    quote!(ins
+                        .remove(0)
+                        .into_iter()
+                        .map(|p| p.endpoint.into())
+                        .collect())
+                }
+                Some(PortKind::OutputArray) => {
+                    quote!(outs
+                        .remove(0)
+                        .into_iter()
+                        .map(|p| p.endpoint.into())
+                        .collect())
+                }
+                None => init.clone(),
+            };
+            tagged_inits.push(quote! { #id: #tagged });
             inits.push(quote! { #id: #init });
         }
     }
+
+    let build_body = if has_dict {
+        quote! { Self::build_tagged(args,
+        ins.into_iter().map(|g| g.into_iter().map(|p| flow_rs::registry::TaggedEndpoint::new(p, None)).collect()).collect(),
+        outs.into_iter().map(|g| g.into_iter().map(|p| flow_rs::registry::TaggedEndpoint::new(p, None)).collect()).collect()) }
+    } else {
+        quote! { Ok(Box::new(#name { #( #inits ),* })) }
+    };
+    let tagged_method = if has_dict {
+        quote! {
+            fn build_tagged(args: &flow_rs::config::Args,
+                mut ins: Vec<Vec<flow_rs::registry::TaggedEndpoint<Receiver>>>,
+                mut outs: Vec<Vec<flow_rs::registry::TaggedEndpoint<Sender>>>,
+            ) -> Result<Box<dyn Actor>> {
+                Ok(Box::new(#name { #(#tagged_inits),* }))
+            }
+        }
+    } else {
+        quote!()
+    };
 
     quote! {
         impl #ig BuildFromPorts for #name #tg #wc {
@@ -490,6 +715,9 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
             const OUTPUTS: &'static [&'static str] = &[ #( #output_names ),* ];
             const INPUT_ARRAY: &'static [bool] = &[ #( #input_array ),* ];
             const OUTPUT_ARRAY: &'static [bool] = &[ #( #output_array ),* ];
+            const INPUT_DICT: &'static [bool] = &[#(#input_dict),*];
+            const OUTPUT_DICT: &'static [bool] = &[#(#output_dict),*];
+            #tagged_method
             fn input_types() -> Vec<flow_rs::config::interlayer::MsgTypeId> {
                 vec![#(#input_types),*]
             }
@@ -501,7 +729,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 mut ins: Vec<Vec<Receiver>>,
                 mut outs: Vec<Vec<Sender>>,
             ) -> Result<Box<dyn Actor>> {
-                Ok(Box::new(#name { #( #inits ),* }))
+                #build_body
             }
         }
     }
@@ -541,10 +769,13 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
                 inputs: <#ty as flow_rs::registry::BuildFromPorts>::INPUTS,
                 outputs: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUTS,
                 input_array: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_ARRAY,
+                input_dict: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_DICT,
+                output_dict: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_DICT,
                 output_array: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_ARRAY,
                 input_types: <#ty as flow_rs::registry::BuildFromPorts>::input_types,
                 output_types: <#ty as flow_rs::registry::BuildFromPorts>::output_types,
                 ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
+                tagged_ctor: <#ty as flow_rs::registry::BuildFromPorts>::build_tagged,
             }
         }
     }
@@ -583,6 +814,7 @@ mod tests {
         PortSpec {
             name: id(s),
             array: false,
+            dict: false,
             payload: None,
         }
     }
@@ -592,6 +824,7 @@ mod tests {
         PortSpec {
             name: id(s),
             array: true,
+            dict: false,
             payload: None,
         }
     }
@@ -616,6 +849,43 @@ mod tests {
     }
 
     #[test]
+    fn template_recognition_is_not_rust_generic_type_resolution() {
+        for (syntax, expected) in [
+            ("T0", Some(0)),
+            ("T12", Some(12)),
+            ("module::T0", None),
+            ("T0<u32>", None),
+            ("Thing", None),
+        ] {
+            assert_eq!(template_index(&parse_str(syntax).unwrap()), expected);
+        }
+        let input: DeriveInput =
+            parse_str("struct D { #[port_template(0)] #[port_template(1)] inp: Receiver }")
+                .unwrap();
+        assert!(expand_build_from_ports(&input)
+            .to_string()
+            .contains("compile_error"));
+    }
+
+    #[test]
+    fn dictionary_grammar_rejects_leftover_and_classifies_exact_value_type() {
+        let port: PortSpec = parse_str("out:{Result<u32, String>}").unwrap();
+        assert!(port.dict && port.payload.is_some());
+        assert!(parse_str::<PortSpec>("out:{u32, String}").is_err());
+        for (source, kind) in [
+            (
+                "std::collections::HashMap<u64, SenderT<String>>",
+                Some(PortKind::OutputDict),
+            ),
+            ("HashMap<u64, Receiver>", Some(PortKind::InputDict)),
+            ("HashMap<String, Sender>", None),
+            ("HashMap<u64, HistorySender>", None),
+        ] {
+            assert_eq!(port_kind(&parse_str(source).unwrap()), kind);
+        }
+    }
+
+    #[test]
     fn inputs_injects_receiver_and_flag() {
         let item: ItemStruct = parse_str("struct D {}").unwrap();
         let out = expand_inputs(&[scalar("inp")], item)
@@ -632,7 +902,7 @@ mod tests {
         let out = expand_inputs(&[array_port("inps")], item)
             .to_string()
             .replace(' ', "");
-        assert!(out.contains("inps:Vec<Receiver>"));
+        assert!(out.contains("inps:Vec<flow_rs::channel::Receiver>"));
         assert!(out.contains("input_closed:bool"));
     }
 
@@ -652,7 +922,7 @@ mod tests {
         let out = expand_outputs(&[array_port("out")], item)
             .to_string()
             .replace(' ', "");
-        assert!(out.contains("out:Vec<Sender>"));
+        assert!(out.contains("out:Vec<flow_rs::channel::Sender>"));
     }
 
     #[test]

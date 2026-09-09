@@ -251,3 +251,44 @@ fn _channel_in_scope() -> (Sender, Receiver) { channel(1) }
 - **完备性可测**:`tests/prelude.rs` 通篇只一行 `use`，却跑通「定义资源 + 定义节点 + 搭图跑图」；再加一组「能编译即在作用域」的编译期检查，把「门面是否完备」变成 `cargo test` 的硬约束。
 
 下一章 **Ch5.2**，我们把这一版和原版**逐条摆开对比**:`anyhow` → `thiserror`、`ctor` + `lazy_static` 运行时注册表 → `inventory` 编译期收集、校验前移到 `build()`、`unsafe` 从原版的几十处降到近乎零、内联展开替嵌套运行时……盘点这一版**为什么 bug 更少、哪些地方更优**，也诚实标出哪些「优」是因为我们**不必**承担原版那些 FFI / 动态 / 硬件的负担。
+
+## 端口描述与带标签引用：接口存在不代表接线完成
+
+原版 `flow-rs/src/lib.rs::prelude` 导出 MsgType、MsgTypeId、PortInfo、PortType，以及
+单个 TOML 值的别名 Arg。当前重构已补这些导出；Args 是参数表，Arg 是表中的一个值，
+不要将两者混为一谈。
+
+PortType 的四个分支 Unit、List、Dict、Dyn 描述端口形态。MsgType 描述载荷类型。
+例如一个 Dict 端口可以存 u32 载荷，“字典”不意味着每条载荷必须是 HashMap。
+后续需要建立的是地址到端点的映射，而不是改变消息载荷的 Rust 类型。
+
+在 `config/interlayer.rs` 中，PortInfo 保存端口名、形态和消息类型；Port 再保存节点类型名、
+节点实例名、PortInfo 和可选地址标签。这个分层让两个同类型节点可以有不同实例名、
+相同端口名，并通过标签连接不同目标。
+
+### 从字符串到标签
+
+原版 `Port::parse` 使用 `splitn(3, ':')`，最多切成三段：
+
+| 输入 | 节点/端口 | 标签 |
+| --- | --- | --- |
+| `router:out` | router / out | None |
+| `router:out:42` | router / out | Some(42) |
+| `router:out:camera:1` | router / out | 对完整 camera:1 哈希 |
+| `router:out:` | router / out | 对空字符串哈希，不是 None |
+
+标签先尝试解析 u64，失败则对原字符串哈希，与消息地址 str2addr 的规则一致。
+不裁剪空白，剩余冒号属于标签。None 表示没有第三段，空第三段仍表示提供了标签，
+这是 Option 与空字符串在业务中的实际区别。
+
+解析返回的节点与端口名是借用切片，来自输入字符串；标签则是新计算的 u64。
+不需要复制名字再切分，也不能让返回切片比输入字符串活得更久。
+
+原版这个解析器允许 `":"` 得到两个空名字，后续配置查找再决定是否合法。
+当前重构的旧 `config::PortRef` 是更严格的二段式教学解析器，两者不能当成同一个 API。
+Builder 尚未全面切换到带标签的 Port 描述，所以补齐解析器**不表示** Demux、字典端口
+或动态实例已经可以使用。它们仍需要宏、注册、接线和运行时的完整配合。
+
+运行 `cargo test --manifest-path code/Cargo.toml -p flow-rs --test port_description --locked`，
+验证标签边界和端口形态。然后独立比较 `r:p`、`r:p:`、`r:p:0` 的返回结果：
+你应能解释为什么这三种写法不能随意合并。

@@ -35,6 +35,7 @@
 - [第 8 课：诊断、编译测试与运行语义](macros/08-engineering.md)
 - [第 9 课：性能、兼容性与发布维护](macros/09-maintenance.md)
 - [第 10 课：crate 协作与 MegFlow 毕业实战](macros/10-megflow.md)
+- [第 11 课：亲手解析 MegFlow 的端口语言](macros/11-port-grammar.md)
 
 # 第 2 部分 · 用宏实现节点
 
@@ -51,6 +52,7 @@
 - [Ch3.1a 配置实作：解析成功之后，还缺什么](part3/ch01a-config-workshop.md)
 - [Ch3.2 Graph Builder：装配节点与 channel](part3/ch02-graph-builder.md)
 - [Ch3.2a 接线实作：把名字变成真实端点](part3/ch02a-wiring-workshop.md)
+- [Ch3.2b 从端口关系推导通道类型](part3/ch02b-template-inference.md)
 - [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机](part3/ch03-scheduler.md)
 - [Ch3.4 端到端跑通 BinaryOp（大里程碑）+ Sandbox 测试框架](part3/ch04-binaryop-e2e.md)
 
@@ -64,6 +66,11 @@
 - [Ch4.5 Reorder：恢复连续序列与原版对照](part4/ch05-reorder.md)
 
 - [Ch4.6 算法消息：从矩形与跟踪状态开始](part4/ch06-algorithm-messages.md)
+
+- [Ch4.7 分流节点：先写清楚按地址路由](part4/ch07-demux.md)
+- [Ch4.7a 让地址标签真正到达构造器](part4/ch07a-tagged-construction.md)
+- [Ch4.7b 实现字典端口宏与按地址装配](part4/ch07b-dictionary-ports.md)
+- [Ch4.7c 把 Demux 装进真实图](part4/ch07c-demux-node.md)
 
 # 第 5 部分 · 兼容 · 优化 · 收尾
 

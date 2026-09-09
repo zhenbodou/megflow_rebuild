@@ -73,3 +73,39 @@ impl MsgType {
         }
     }
 }
+
+/// 端口形态，与原版区分标量、数组、字典和动态端口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortType {
+    Unit,
+    List,
+    Dict,
+    Dyn,
+}
+#[derive(Clone, Debug)]
+pub struct PortInfo {
+    pub name: String,
+    pub ty: PortType,
+    pub mty: MsgType,
+}
+#[derive(Clone, Debug)]
+pub struct Port {
+    pub node_type: String,
+    pub node_name: String,
+    pub port_info: PortInfo,
+    pub port_tag: Option<u64>,
+}
+impl Port {
+    /// 原版 splitn(3) 规则：第三段余下的冒号属于标签；不裁剪空白。
+    pub fn parse(name: &str) -> crate::error::Result<((&str, &str), Option<u64>)> {
+        let mut parts = name.splitn(3, ':');
+        let pair = parts
+            .next()
+            .zip(parts.next())
+            .ok_or_else(|| crate::error::Error::BadPortRef(name.to_owned()))?;
+        Ok((pair, parts.next().map(crate::envelope::str2addr)))
+    }
+    pub fn is_dyn(&self) -> bool {
+        matches!(self.port_info.ty, PortType::Dyn)
+    }
+}

@@ -44,6 +44,23 @@ use crate::resource::AnyResource;
 pub type NodeCtor =
     fn(&crate::config::Args, Vec<Vec<Receiver>>, Vec<Vec<Sender>>) -> Result<Box<dyn Actor>>;
 
+/// 一个已接线端点及其地址标签；标签属于接线，不能按 Vec 位置重建。
+#[derive(Default)]
+pub struct TaggedEndpoint<T> {
+    pub tag: Option<u64>,
+    pub endpoint: T,
+}
+impl<T> TaggedEndpoint<T> {
+    pub fn new(endpoint: T, tag: Option<u64>) -> Self {
+        Self { tag, endpoint }
+    }
+}
+pub type TaggedNodeCtor = fn(
+    &crate::config::Args,
+    Vec<Vec<TaggedEndpoint<Receiver>>>,
+    Vec<Vec<TaggedEndpoint<Sender>>>,
+) -> Result<Box<dyn Actor>>;
+
 /// 注册表里的一条条目：类型名 + 端口名表 + 数组标记表 + 构造器。
 /// One registry entry: type name, port-name tables, array-ness tables, and constructor.
 pub struct NodeRegistration {
@@ -55,6 +72,8 @@ pub struct NodeRegistration {
     /// 输出端口名，同上（= `Sender`/`Vec<Sender>` 字段的声明顺序）。
     pub outputs: &'static [&'static str],
     /// 与 `inputs` 并行：每个输入端口是否**数组端口**（`Vec<Receiver>` → true，扇入）。
+    pub input_dict: &'static [bool],
+    pub output_dict: &'static [bool],
     pub input_array: &'static [bool],
     /// 与 `outputs` 并行：每个输出端口是否**数组端口**（`Vec<Sender>` → true，扇出）。
     pub output_array: &'static [bool],
@@ -62,9 +81,27 @@ pub struct NodeRegistration {
     pub input_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
     pub output_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
     pub ctor: NodeCtor,
+    pub tagged_ctor: TaggedNodeCtor,
 }
 
 impl NodeRegistration {
+    pub fn input_is_dict(&self, port: &str) -> bool {
+        self.inputs
+            .iter()
+            .position(|p| *p == port)
+            .and_then(|i| self.input_dict.get(i))
+            .copied()
+            .unwrap_or(false)
+    }
+    pub fn output_is_dict(&self, port: &str) -> bool {
+        self.outputs
+            .iter()
+            .position(|p| *p == port)
+            .and_then(|i| self.output_dict.get(i))
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// 该输入端口是否数组端口（查名表定位、再取并行的 `input_array`；查无此端口 → false）。
     /// Whether the named input port is an array (variadic) port.
     pub fn input_is_array(&self, port: &str) -> bool {
@@ -108,6 +145,8 @@ pub trait BuildFromPorts {
     /// 输出端口名，按 `build` 消费 `outs` 的顺序。/ output port names, in fill order.
     const OUTPUTS: &'static [&'static str];
     /// 与 `INPUTS` 并行的数组标记：每个输入端口是否 `Vec<Receiver>`（数组端口）。
+    const INPUT_DICT: &'static [bool] = &[];
+    const OUTPUT_DICT: &'static [bool] = &[];
     const INPUT_ARRAY: &'static [bool];
     /// 与 `OUTPUTS` 并行的数组标记：每个输出端口是否 `Vec<Sender>`（数组端口）。
     const OUTPUT_ARRAY: &'static [bool];
@@ -118,6 +157,23 @@ pub trait BuildFromPorts {
     }
     fn output_types() -> Vec<crate::config::interlayer::MsgTypeId> {
         vec![crate::config::interlayer::MsgTypeId::Any; Self::OUTPUTS.len()]
+    }
+
+    /// 标量和列表端口不消费标签，沿用 build；字典实现必须覆盖此方法。
+    fn build_tagged(
+        args: &crate::config::Args,
+        ins: Vec<Vec<TaggedEndpoint<Receiver>>>,
+        outs: Vec<Vec<TaggedEndpoint<Sender>>>,
+    ) -> Result<Box<dyn Actor>> {
+        Self::build(
+            args,
+            ins.into_iter()
+                .map(|group| group.into_iter().map(|p| p.endpoint).collect())
+                .collect(),
+            outs.into_iter()
+                .map(|group| group.into_iter().map(|p| p.endpoint).collect())
+                .collect(),
+        )
     }
 
     /// 用 `args` 填自有参数、按顺序接好**分组**端口，返回擦除后的节点（失败 → `Err`）。

@@ -209,6 +209,11 @@ fn resolve_ref(
     match graphs.get(nd.ty.as_str()) {
         // 子图引用：把边界端口映射到内部端口，逐个下钻。
         Some(sub) => {
+            if pref.tag.is_some() {
+                return Err(Error::Unsupported(
+                    "tagged subgraph boundary requires graph port metadata".into(),
+                ));
+            }
             let decl = sub
                 .inputs
                 .iter()
@@ -226,7 +231,7 @@ fn resolve_ref(
         }
         // 叶子节点：产出带前缀的叶子引用。
         None => {
-            out.push(format!("{}{}:{}", prefix, pref.node, pref.port));
+            out.push(format!("{}{}", prefix, r));
             Ok(())
         }
     }

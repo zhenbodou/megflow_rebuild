@@ -66,6 +66,12 @@ jobs:
       - name: Validate subgraph teaching example
         run: cargo run --manifest-path code/Cargo.toml -p flow-rs --example subgraph_steps --locked
 
+      - name: Validate port grammar workshop
+        run: cargo run --manifest-path code/Cargo.toml -p flow-derive --example port_grammar --locked
+
+      - name: Validate Demux routing workshop
+        run: cargo run --manifest-path code/Cargo.toml -p flow-rs --example demux_steps --locked
+
       - name: Build book
         run: mdbook build book
 

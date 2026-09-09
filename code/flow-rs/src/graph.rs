@@ -28,12 +28,13 @@
 //! positional construction and the config's named wiring; cross-ref validation
 //! lands here.
 
-use crate::channel::{channel_with_type, guess_channel_type, Receiver, Sender};
+use crate::channel::{channel_with_type, Receiver, Sender};
 use crate::config::{Config, GraphConfig, PortRef};
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
+use crate::registry::TaggedEndpoint;
 use crate::resource::{AnyResource, ResourceCollection};
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
@@ -50,88 +51,55 @@ fn node_reg(g: &GraphConfig, node: &str) -> Result<&'static registry::NodeRegist
     registry::find(&nd.ty).ok_or_else(|| Error::UnknownNodeType(nd.ty.clone()))
 }
 
-// 名字与类型列表同序；在创建队列前按方向收集具体端口的声明。
-fn connection_type(
-    g: &GraphConfig,
-    tx: &[PortRef],
-    rx: &[PortRef],
-) -> Result<crate::config::interlayer::MsgTypeId> {
-    let collect = |ports: &[PortRef], input: bool| -> Result<std::collections::HashSet<_>> {
-        ports
-            .iter()
-            .map(|port| {
-                let registration = node_reg(g, port.node)?;
-                let (names, types) = if input {
-                    (registration.inputs, (registration.input_types)())
-                } else {
-                    (registration.outputs, (registration.output_types)())
-                };
-                let index = names
-                    .iter()
-                    .position(|name| *name == port.port)
-                    .ok_or_else(|| Error::UnknownPort {
-                        node: port.node.to_owned(),
-                        port: port.port.to_owned(),
-                    })?;
-                types.get(index).copied().ok_or_else(|| {
-                    Error::BadConnection(format!(
-                        "node {:?} port type metadata length does not match names",
-                        port.node
-                    ))
-                })
-            })
-            .collect()
-    };
-    guess_channel_type(&collect(tx, false)?, &collect(rx, true)?)
-}
-
 /// 把一个 `Receiver` 挂到某节点输入端口的**端口组**上（Ch4.2：一个端口名 → 一组 channel 端）。
 /// **标量**输入端口只能接 1 条边，已有边再接 → `PortAlreadyConnected`；**数组**输入端口
 /// （`Vec<Receiver>`）可接多条（扇入 Merge）。未声明的端口按标量处理，留到构造期的
 /// 「多余端口」检查报 `UnknownPort`。
 fn attach_receiver(
-    node_ins: &mut HashMap<String, HashMap<String, Vec<Receiver>>>,
+    node_ins: &mut HashMap<String, HashMap<String, Vec<TaggedEndpoint<Receiver>>>>,
     reg: &registry::NodeRegistration,
     node: &str,
     port: &str,
     rx: Receiver,
+    tag: Option<u64>,
 ) -> Result<()> {
     let slot = node_ins
         .entry(node.to_owned())
         .or_default()
         .entry(port.to_owned())
         .or_default();
-    if !reg.input_is_array(port) && !slot.is_empty() {
+    if !reg.input_is_array(port) && !reg.input_is_dict(port) && !slot.is_empty() {
         return Err(Error::PortAlreadyConnected {
             node: node.to_owned(),
             port: port.to_owned(),
         });
     }
-    slot.push(rx);
+    slot.push(TaggedEndpoint::new(rx, tag));
     Ok(())
 }
 
 /// 把一个 `Sender` 挂到某节点输出端口的**端口组**上。**标量**输出端口只能接 1 条边，
 /// 已有边再接 → `PortAlreadyConnected`；**数组**输出端口（`Vec<Sender>`）可接多条（扇出 Bcast）。
 fn attach_sender(
-    node_outs: &mut HashMap<String, HashMap<String, Vec<Sender>>>,
+    node_outs: &mut HashMap<String, HashMap<String, Vec<TaggedEndpoint<Sender>>>>,
     reg: &registry::NodeRegistration,
     node: &str,
     port: &str,
     tx: Sender,
+    tag: Option<u64>,
 ) -> Result<()> {
     let slot = node_outs
         .entry(node.to_owned())
         .or_default()
         .entry(port.to_owned())
         .or_default();
-    if !reg.output_is_array(port) && !slot.is_empty() {
+    if !reg.output_is_array(port) && !reg.output_is_dict(port) && !slot.is_empty() {
         return Err(Error::PortAlreadyConnected {
             node: node.to_owned(),
             port: port.to_owned(),
         });
     }
-    slot.push(tx);
+    slot.push(TaggedEndpoint::new(tx, tag));
     Ok(())
 }
 
@@ -210,10 +178,15 @@ impl MainGraph {
             .main_graph()
             .ok_or_else(|| Error::MainGraphNotFound(config.main.clone()))?;
 
+        let inference = crate::config::type_infer::infer(g)?;
+        let mut inferred = inference.connections.iter().copied();
+
         // 每个节点各端口的 channel 端，按名收集（Ch4.2：一个端口名 → 一组 channel 端——
         // 标量端口是恰 1 个的组、数组端口是 N 个的组）；对外句柄单独收。
-        let mut node_ins: HashMap<String, HashMap<String, Vec<Receiver>>> = HashMap::new();
-        let mut node_outs: HashMap<String, HashMap<String, Vec<Sender>>> = HashMap::new();
+        let mut node_ins: HashMap<String, HashMap<String, Vec<TaggedEndpoint<Receiver>>>> =
+            HashMap::new();
+        let mut node_outs: HashMap<String, HashMap<String, Vec<TaggedEndpoint<Sender>>>> =
+            HashMap::new();
         let mut inputs: HashMap<String, Sender> = HashMap::new();
         let mut outputs: HashMap<String, Receiver> = HashMap::new();
 
@@ -225,18 +198,15 @@ impl MainGraph {
                     pc.name
                 )));
             }
-            let references = pc
-                .ports
-                .iter()
-                .map(|port| PortRef::parse(port))
-                .collect::<Result<Vec<_>>>()?;
-            let ty = connection_type(g, &[], &references)?;
+            let ty = inferred.next().expect("input connection type");
             let (tx, rx) = channel_with_type(pc.cap, ty);
             inputs.insert(pc.name.clone(), tx);
             for port in &pc.ports {
                 let pref = PortRef::parse(port)?;
                 let reg = node_reg(g, pref.node)?;
-                attach_receiver(&mut node_ins, reg, pref.node, pref.port, rx.clone())?;
+                let mut endpoint = rx.clone();
+                endpoint.with_type(&inference.port_type(pref.node, pref.port, true));
+                attach_receiver(&mut node_ins, reg, pref.node, pref.port, endpoint, pref.tag)?;
             }
         }
 
@@ -249,18 +219,22 @@ impl MainGraph {
                     pc.name
                 )));
             }
-            let references = pc
-                .ports
-                .iter()
-                .map(|port| PortRef::parse(port))
-                .collect::<Result<Vec<_>>>()?;
-            let ty = connection_type(g, &references, &[])?;
+            let ty = inferred.next().expect("output connection type");
             let (tx, rx) = channel_with_type(pc.cap, ty);
             outputs.insert(pc.name.clone(), rx);
             for pref_str in &pc.ports {
                 let pref = PortRef::parse(pref_str)?;
                 let reg = node_reg(g, pref.node)?;
-                attach_sender(&mut node_outs, reg, pref.node, pref.port, tx.clone())?;
+                let mut endpoint = tx.clone();
+                endpoint.with_type(&inference.port_type(pref.node, pref.port, false));
+                attach_sender(
+                    &mut node_outs,
+                    reg,
+                    pref.node,
+                    pref.port,
+                    endpoint,
+                    pref.tag,
+                )?;
             }
         }
 
@@ -304,13 +278,22 @@ impl MainGraph {
                 )));
             }
 
-            let ty = connection_type(g, &senders, &receivers)?;
+            let ty = inferred.next().expect("internal connection type");
             let (tx, rx) = channel_with_type(conn.cap, ty);
             // 接收端：把这条 channel 的 rx 挂到该输入端口。标量端口重复接 → PortAlreadyConnected；
             // 数组输入端口（Merge 扇入）允许多条连接各挂一个 Receiver，攒成一组。
             for rcv in &receivers {
                 let rcv_reg = node_reg(g, rcv.node)?;
-                attach_receiver(&mut node_ins, rcv_reg, rcv.node, rcv.port, rx.clone())?;
+                let mut endpoint = rx.clone();
+                endpoint.with_type(&inference.port_type(rcv.node, rcv.port, true));
+                attach_receiver(
+                    &mut node_ins,
+                    rcv_reg,
+                    rcv.node,
+                    rcv.port,
+                    endpoint,
+                    rcv.tag,
+                )?;
             }
             drop(rx);
             // 发送端：每个输出端口挂一份 tx.clone()（同一条连接多个发送端即经典扇入）。
@@ -318,7 +301,16 @@ impl MainGraph {
             // 多条连接各挂一个 Sender，攒成一组。
             for snd in &senders {
                 let snd_reg = node_reg(g, snd.node)?;
-                attach_sender(&mut node_outs, snd_reg, snd.node, snd.port, tx.clone())?;
+                let mut endpoint = tx.clone();
+                endpoint.with_type(&inference.port_type(snd.node, snd.port, false));
+                attach_sender(
+                    &mut node_outs,
+                    snd_reg,
+                    snd.node,
+                    snd.port,
+                    endpoint,
+                    snd.tag,
+                )?;
             }
         }
 
@@ -334,18 +326,18 @@ impl MainGraph {
             // 按声明顺序把命名端口组排成位置分组 Vec——顺序即注册表 INPUTS/OUTPUTS，
             // 与构造器填字段同序。未接线标量补默认端点，数组端口保留空组。
             // 原版 conn_check 对断开端口仅警告，默认 Receiver 关闭、Sender 丢弃并成功。
-            let mut ins: Vec<Vec<Receiver>> = Vec::with_capacity(reg.inputs.len());
+            let mut ins: Vec<Vec<TaggedEndpoint<Receiver>>> = Vec::with_capacity(reg.inputs.len());
             for &port in reg.inputs {
                 let mut group = ins_map.remove(port).unwrap_or_default();
-                if group.is_empty() && !reg.input_is_array(port) {
+                if group.is_empty() && !reg.input_is_array(port) && !reg.input_is_dict(port) {
                     group.push(Default::default());
                 }
                 ins.push(group);
             }
-            let mut outs: Vec<Vec<Sender>> = Vec::with_capacity(reg.outputs.len());
+            let mut outs: Vec<Vec<TaggedEndpoint<Sender>>> = Vec::with_capacity(reg.outputs.len());
             for &port in reg.outputs {
                 let mut group = outs_map.remove(port).unwrap_or_default();
-                if group.is_empty() && !reg.output_is_array(port) {
+                if group.is_empty() && !reg.output_is_array(port) && !reg.output_is_dict(port) {
                     group.push(Default::default());
                 }
                 outs.push(group);
@@ -364,7 +356,7 @@ impl MainGraph {
                 });
             }
 
-            actors.push((reg.ctor)(&nd.args, ins, outs)?);
+            actors.push((reg.tagged_ctor)(&nd.args, ins, outs)?);
         }
 
         // 图的**共享资源**（Ch4.3）：按 `ty` 查资源注册表、`(ctor)(args)` 造一份类型擦除的

@@ -48,3 +48,7 @@ pub use crate::node::{Actor, Node}; // trait 形态（与上面的派生宏同�
 pub use crate::registry::BuildFromPorts; // trait 形态。
 pub use crate::resource::BuildResource;
 pub use crate::sandbox::Sandbox;
+
+// 原版公开的端口/消息类型描述与单个 TOML 参数值。
+pub use crate::config::interlayer::{MsgType, MsgTypeId, PortInfo, PortType};
+pub type Arg = toml::value::Value;

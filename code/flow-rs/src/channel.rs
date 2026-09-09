@@ -107,6 +107,12 @@ impl TypeInfo for Receiver {
 }
 
 impl Sender {
+    /// 缓存端口类型 → 通道类型的直接转换，与原版装配方向一致。
+    #[doc(hidden)]
+    pub fn with_type(&mut self, port_type: &MsgTypeId) {
+        self.conversion = conversion::lookup(*port_type, self.chan_tid());
+    }
+
     /// 默认端点尚未接到队列；与已接线后关闭不同。
     pub fn is_none(&self) -> bool {
         matches!(self.inner, SendImpl::Unconnected)
@@ -159,6 +165,12 @@ impl<T> std::fmt::Debug for BatchRecvError<T> {
 }
 
 impl Receiver {
+    /// 缓存通道类型 → 端口类型的直接转换。
+    #[doc(hidden)]
+    pub fn with_type(&mut self, port_type: &MsgTypeId) {
+        self.conversion = conversion::lookup(self.chan_tid(), *port_type);
+    }
+
     pub fn is_none(&self) -> bool {
         self.inner.is_none()
     }

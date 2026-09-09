@@ -34,9 +34,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-/// 沙箱内每条 channel 的容量。取一个小定值即可：喂数任务与节点任务并发跑，
-/// 缓冲满了触发背压、节点一取就腾出，不会死锁——容量只影响批量喂数时的并发深度。
-const SANDBOX_CAP: usize = 16;
+/// 原版静态 Sandbox 使用容量 0，即无界队列。
+const SANDBOX_CAP: usize = 0;
 
 /// 喂数 / 收数任务的类型擦除句柄：一串「跑到自然结束」的 future。
 /// `add_data`/`add_check` 是泛型（按端口消息类型 `T` 单态化），把各自的 future 装箱后
@@ -78,23 +77,25 @@ impl Sandbox {
         // 故每个端口都是**恰好 1 个的组**（`vec![rx]`）——数组端口在这里退化成 1 路，真正的
         // N 路扇出/扇入靠 graph 端到端测试覆盖。
         let mut inputs = HashMap::new();
-        let mut ins: Vec<Vec<Receiver>> = Vec::with_capacity(reg.inputs.len());
+        let mut ins: Vec<Vec<registry::TaggedEndpoint<Receiver>>> =
+            Vec::with_capacity(reg.inputs.len());
         for &port in reg.inputs {
             let (tx, rx) = channel(SANDBOX_CAP);
             inputs.insert(port.to_owned(), tx);
-            ins.push(vec![rx]);
+            ins.push(vec![registry::TaggedEndpoint::new(rx, Some(0))]);
         }
         // 输出端口：channel 的 Sender 给节点，Receiver 留给沙箱（供 add_check 收数）。
         let mut outputs = HashMap::new();
-        let mut outs: Vec<Vec<Sender>> = Vec::with_capacity(reg.outputs.len());
+        let mut outs: Vec<Vec<registry::TaggedEndpoint<Sender>>> =
+            Vec::with_capacity(reg.outputs.len());
         for &port in reg.outputs {
             let (tx, rx) = channel(SANDBOX_CAP);
             outputs.insert(port.to_owned(), rx);
-            outs.push(vec![tx]);
+            outs.push(vec![registry::TaggedEndpoint::new(tx, Some(0))]);
         }
 
         // 端口按注册表的名表顺序排成位置 Vec，交给构造器（与 Graph Builder 同一套接线逻辑）。
-        let actor = (reg.ctor)(&args, ins, outs)?;
+        let actor = (reg.tagged_ctor)(&args, ins, outs)?;
         Ok(Sandbox {
             actor: Some(actor),
             inputs,
