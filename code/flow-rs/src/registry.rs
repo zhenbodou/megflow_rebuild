@@ -59,6 +59,8 @@ pub struct NodeRegistration {
     /// 与 `outputs` 并行：每个输出端口是否**数组端口**（`Vec<Sender>` → true，扇出）。
     pub output_array: &'static [bool],
     /// 该类型的构造器（`<T as BuildFromPorts>::build`）。
+    pub input_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
+    pub output_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
     pub ctor: NodeCtor,
 }
 
@@ -109,6 +111,14 @@ pub trait BuildFromPorts {
     const INPUT_ARRAY: &'static [bool];
     /// 与 `OUTPUTS` 并行的数组标记：每个输出端口是否 `Vec<Sender>`（数组端口）。
     const OUTPUT_ARRAY: &'static [bool];
+
+    /// 与端口名表同序；旧的无类型手写构造器默认声明 Any。
+    fn input_types() -> Vec<crate::config::interlayer::MsgTypeId> {
+        vec![crate::config::interlayer::MsgTypeId::Any; Self::INPUTS.len()]
+    }
+    fn output_types() -> Vec<crate::config::interlayer::MsgTypeId> {
+        vec![crate::config::interlayer::MsgTypeId::Any; Self::OUTPUTS.len()]
+    }
 
     /// 用 `args` 填自有参数、按顺序接好**分组**端口，返回擦除后的节点（失败 → `Err`）。
     /// Fill args, wire grouped ports by order; return the type-erased node (or error).

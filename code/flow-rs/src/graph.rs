@@ -28,7 +28,7 @@
 //! positional construction and the config's named wiring; cross-ref validation
 //! lands here.
 
-use crate::channel::{channel, Receiver, Sender};
+use crate::channel::{channel_with_type, guess_channel_type, Receiver, Sender};
 use crate::config::{Config, GraphConfig, PortRef};
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -48,6 +48,41 @@ fn node_reg(g: &GraphConfig, node: &str) -> Result<&'static registry::NodeRegist
         .find(|n| n.name == node)
         .ok_or_else(|| Error::UnknownNode(node.to_owned()))?;
     registry::find(&nd.ty).ok_or_else(|| Error::UnknownNodeType(nd.ty.clone()))
+}
+
+// 名字与类型列表同序；在创建队列前按方向收集具体端口的声明。
+fn connection_type(
+    g: &GraphConfig,
+    tx: &[PortRef],
+    rx: &[PortRef],
+) -> Result<crate::config::interlayer::MsgTypeId> {
+    let collect = |ports: &[PortRef], input: bool| -> Result<std::collections::HashSet<_>> {
+        ports
+            .iter()
+            .map(|port| {
+                let registration = node_reg(g, port.node)?;
+                let (names, types) = if input {
+                    (registration.inputs, (registration.input_types)())
+                } else {
+                    (registration.outputs, (registration.output_types)())
+                };
+                let index = names
+                    .iter()
+                    .position(|name| *name == port.port)
+                    .ok_or_else(|| Error::UnknownPort {
+                        node: port.node.to_owned(),
+                        port: port.port.to_owned(),
+                    })?;
+                types.get(index).copied().ok_or_else(|| {
+                    Error::BadConnection(format!(
+                        "node {:?} port type metadata length does not match names",
+                        port.node
+                    ))
+                })
+            })
+            .collect()
+    };
+    guess_channel_type(&collect(tx, false)?, &collect(rx, true)?)
 }
 
 /// 把一个 `Receiver` 挂到某节点输入端口的**端口组**上（Ch4.2：一个端口名 → 一组 channel 端）。
@@ -190,7 +225,13 @@ impl MainGraph {
                     pc.name
                 )));
             }
-            let (tx, rx) = channel(pc.cap);
+            let references = pc
+                .ports
+                .iter()
+                .map(|port| PortRef::parse(port))
+                .collect::<Result<Vec<_>>>()?;
+            let ty = connection_type(g, &[], &references)?;
+            let (tx, rx) = channel_with_type(pc.cap, ty);
             inputs.insert(pc.name.clone(), tx);
             for port in &pc.ports {
                 let pref = PortRef::parse(port)?;
@@ -208,7 +249,13 @@ impl MainGraph {
                     pc.name
                 )));
             }
-            let (tx, rx) = channel(pc.cap);
+            let references = pc
+                .ports
+                .iter()
+                .map(|port| PortRef::parse(port))
+                .collect::<Result<Vec<_>>>()?;
+            let ty = connection_type(g, &references, &[])?;
+            let (tx, rx) = channel_with_type(pc.cap, ty);
             outputs.insert(pc.name.clone(), rx);
             for pref_str in &pc.ports {
                 let pref = PortRef::parse(pref_str)?;
@@ -257,7 +304,8 @@ impl MainGraph {
                 )));
             }
 
-            let (tx, rx) = channel(conn.cap);
+            let ty = connection_type(g, &senders, &receivers)?;
+            let (tx, rx) = channel_with_type(conn.cap, ty);
             // 接收端：把这条 channel 的 rx 挂到该输入端口。标量端口重复接 → PortAlreadyConnected；
             // 数组输入端口（Merge 扇入）允许多条连接各挂一个 Receiver，攒成一组。
             for rcv in &receivers {

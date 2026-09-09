@@ -58,3 +58,38 @@ fn candidate_requires_both_incoming_and_outgoing_direct_conversions() {
         Err(Error::ChannelTypeMismatch)
     ));
 }
+
+#[derive(Clone)]
+struct Raw(u32);
+#[derive(Clone)]
+struct Stored(u32);
+#[derive(Clone)]
+struct Rendered(String);
+
+#[tokio::test]
+async fn inferred_type_drives_both_endpoint_conversions() {
+    use flow_message::Envelope;
+    use flow_rs::channel::{channel_with_type, ReceiverT, SenderT};
+    let (raw, stored, rendered) = (
+        MsgTypeId::of::<Raw>(),
+        MsgTypeId::of::<Stored>(),
+        MsgTypeId::of::<Rendered>(),
+    );
+    add_cvt_func_impl(raw, stored, |mut message| {
+        let envelope = message.downcast_mut::<Envelope<Raw>>().unwrap();
+        let value = envelope.unpack().0;
+        envelope.repack(Stored(value + 1)).seal()
+    });
+    add_cvt_func_impl(stored, rendered, |mut message| {
+        let envelope = message.downcast_mut::<Envelope<Stored>>().unwrap();
+        let value = envelope.unpack().0;
+        envelope.repack(Rendered(value.to_string())).seal()
+    });
+    let selected = guess_channel_type(&set(&[raw, stored]), &set(&[stored, rendered])).unwrap();
+    assert_eq!(selected, stored);
+    let (sender, receiver) = channel_with_type(1, selected);
+    let sender: SenderT<Raw> = sender.into();
+    let receiver: ReceiverT<Rendered> = receiver.into();
+    sender.send(Envelope::new(Raw(9))).await.unwrap();
+    assert_eq!(receiver.recv().await.unwrap().unpack().0, "10");
+}

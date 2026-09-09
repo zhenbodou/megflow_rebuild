@@ -43,3 +43,16 @@ async fn typed_attributes_register_wire_preserve_metadata_and_close() {
         .unwrap();
     assert_eq!(*received.lock().unwrap(), [(String::from("42"), Some(8))]);
 }
+
+#[test]
+fn registration_exposes_payload_types_without_constructing_node() {
+    use flow_rs::config::interlayer::MsgTypeId;
+    let registration = flow_rs::registry::find("TypedPortNode").unwrap();
+    assert_eq!(registration.inputs, &["inp"]);
+    assert_eq!((registration.input_types)(), vec![MsgTypeId::of::<u32>()]);
+    assert_eq!(registration.outputs, &["out"]);
+    assert_eq!(
+        (registration.output_types)(),
+        vec![MsgTypeId::of::<String>()]
+    );
+}

@@ -63,8 +63,10 @@
 - [Ch4.4a 子图实作：亲手追踪递归展开](part4/ch04a-subgraph-workshop.md)
 - [Ch4.5 Reorder：恢复连续序列与原版对照](part4/ch05-reorder.md)
 
+- [Ch4.6 算法消息：从矩形与跟踪状态开始](part4/ch06-algorithm-messages.md)
+
 # 第 5 部分 · 兼容 · 优化 · 收尾
 
 - [Ch5.1 对齐真实 API，跑真实算法仓风格的图 + pplcore 边界](part5/ch01-prelude-api-alignment.md)
 - [Ch5.2 优化与更少 bug：逐条对比原版](part5/ch02-optimizations-vs-original.md)
-- [Ch5.3 全景回顾 + 进阶指路](part5/ch03-retrospective-and-next-steps.md)
+- [Ch5.3 全景回顾与完整框架毕业验收](part5/ch03-retrospective-and-next-steps.md)

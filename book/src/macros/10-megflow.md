@@ -316,3 +316,70 @@ fn widen(value: u32) -> u64 { value as u64 }
 本次验证包含两类证据：生成器测试比较不同合法 Rust 参数写法的展开结果相同；
 下游转换测试实际使用 `(_, _)` 和字符串提示，确认登记、收发和元信息保留仍然有效。
 独立练习：增加非法第三槽位，观察错误是在参数解析阶段出现，而不是等消息发送才发现。
+
+## 节点宏与类型推断衔接：注册表必须保留载荷类型
+
+转换函数已经能登记，但 Builder 还需要知道每个节点端口声明了什么类型。
+不能先随便创建节点再问：构造器需要端点，端点的通道类型又取决于节点声明，会形成循环依赖。
+因此类型信息应与端口名一样，在注册阶段可查询。
+
+### 1. 从手写契约开始
+
+在 `BuildFromPorts` 中加入：
+
+```rust,ignore
+fn input_types() -> Vec<MsgTypeId>;
+fn output_types() -> Vec<MsgTypeId>;
+```
+
+当前 trait 为旧的无类型手写实现提供默认方法：按 INPUTS/OUTPUTS 的长度生成 Any 列表。
+若手写类型化节点，就必须覆盖这两个方法，不能继续依赖默认值。
+
+`NodeRegistration` 保存这两个方法的函数指针。和转换注册项一样，静态登记只保存
+“怎样取得信息”，真正需要 TypeId 时再调用函数，不是在过程宏执行时计算用户类型。
+
+### 2. 在同一次字段遍历中生成三份对应数据
+
+已有宏遍历字段生成端口名和数组标记。现在同时追加消息类型：
+
+| 字段 | 端口名字 | 数组标记 | 消息类型 |
+| --- | --- | --- | --- |
+| `a: ReceiverT<u32>` | a | false | `MsgTypeId::of::<u32>()` |
+| `b: Receiver` | b | false | Any |
+| `out: SenderT<String>` | out | false | `MsgTypeId::of::<String>()` |
+| `inps: Vec<Receiver>` | inps | true | Any |
+
+同一次遍历的目的不仅是少写循环，还要保持对应关系：类型列表的第 i 项必须属于名字列表
+的第 i 项。不要对其中一张列表排序，也不要分别遍历两个 HashMap 来生成它们。
+
+`message_type` 复用 `wrapped_type` 从 `Type::Path` 最后一个路径段提取唯一类型实参。
+它处理明确支持的 ReceiverT/SenderT，不猜测字符串中包含 Sender 的任意业务类型。
+当前对类型别名和完整模板/字典端口的识别仍需补齐，不能声称支持所有 Rust 类型表达式。
+
+生成的是函数体中的代码：
+
+```rust,ignore
+fn input_types() -> Vec<flow_rs::config::interlayer::MsgTypeId> {
+    vec![flow_rs::config::interlayer::MsgTypeId::of::<u32>()]
+}
+```
+
+这里 quote 的 `#payload` 插入 syn::Type，不是将类型名转换成字符串。字段类型为 T 时，
+泛型约束仍需让生成代码满足 TypeId 的 `'static` 要求；过程宏不是类型检查器，不能替
+编译器推断任意别名或缺失约束。
+
+### 3. 不创建节点也能验证声明
+
+`tests/typed_node.rs::registration_exposes_payload_types_without_constructing_node`
+直接查 TypedPortNode 的登记，验证 inp 对应 u32、out 对应 String，没有调用节点构造器。
+执行：
+
+```sh
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_node --locked
+```
+
+独立练习：声明 a、b 两个不同载荷类型的输入，将字段顺序交换，检查端口名和类型列表
+是否一起交换。这个实验用于发现宏生成的“名字对了、类型下标错了”。
+
+现在 Builder 可以读取具体类型，但尚需把同一条连接的端口按发送/接收方向收集成集合，
+调用上一课的 guess_channel_type，再把选出的类型用于创建队列。当前 Builder 已接入具体类型信息的收集与队列创建（Ch3.2a），跨连接模板等完整建图类型推断仍在验收账本中，不应将测试通过误写成全图转换已经自动完成。

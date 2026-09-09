@@ -417,6 +417,13 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
 /// 裸名 `Receiver`/`Sender`/`Actor`/`Result`/`BuildFromPorts` 沿用 Ch2.3 的策略（要求
 /// 使用处 `use`）；新引入的 `Args`/`arg` 用**绝对路径** `flow_rs::config::..`，免得再逼
 /// 使用处多写两个 `use`（与 `node_register!` 的绝对路径策略一致）。
+fn message_type(ty: &Type) -> TokenStream2 {
+    match wrapped_type(ty, "ReceiverT").or_else(|| wrapped_type(ty, "SenderT")) {
+        Some(payload) => quote!(flow_rs::config::interlayer::MsgTypeId::of::<#payload>()),
+        None => quote!(flow_rs::config::interlayer::MsgTypeId::Any),
+    }
+}
+
 pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
@@ -426,6 +433,8 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     let mut output_names: Vec<LitStr> = Vec::new();
     let mut input_array: Vec<bool> = Vec::new();
     let mut output_array: Vec<bool> = Vec::new();
+    let mut input_types = Vec::new();
+    let mut output_types = Vec::new();
     if let Data::Struct(data) = &input.data {
         for f in data.fields.iter() {
             let Some(id) = &f.ident else { continue };
@@ -443,6 +452,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 let is_array = port_kind(&f.ty) == Some(PortKind::OutputArray);
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
+                output_types.push(message_type(&f.ty));
                 if port_kind(&f.ty) == Some(PortKind::TypedOutput) {
                     quote! { outs.remove(0).remove(0).into() }
                 } else if is_array {
@@ -457,6 +467,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 let is_array = port_kind(&f.ty) == Some(PortKind::InputArray);
                 input_names.push(LitStr::new(&id.to_string(), id.span()));
                 input_array.push(is_array);
+                input_types.push(message_type(&f.ty));
                 if is_array {
                     quote! { ins.remove(0) } // 数组输入：整组 Vec<Receiver> 搬走
                 } else {
@@ -479,6 +490,12 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
             const OUTPUTS: &'static [&'static str] = &[ #( #output_names ),* ];
             const INPUT_ARRAY: &'static [bool] = &[ #( #input_array ),* ];
             const OUTPUT_ARRAY: &'static [bool] = &[ #( #output_array ),* ];
+            fn input_types() -> Vec<flow_rs::config::interlayer::MsgTypeId> {
+                vec![#(#input_types),*]
+            }
+            fn output_types() -> Vec<flow_rs::config::interlayer::MsgTypeId> {
+                vec![#(#output_types),*]
+            }
             fn build(
                 args: &flow_rs::config::Args,
                 mut ins: Vec<Vec<Receiver>>,
@@ -525,6 +542,8 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
                 outputs: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUTS,
                 input_array: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_ARRAY,
                 output_array: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_ARRAY,
+                input_types: <#ty as flow_rs::registry::BuildFromPorts>::input_types,
+                output_types: <#ty as flow_rs::registry::BuildFromPorts>::output_types,
                 ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
             }
         }

@@ -11,4 +11,5 @@ with tempfile.TemporaryDirectory(prefix='megflow-message-course-') as directory:
     subprocess.run([sys.executable, str(root / 'scripts/message_checkpoint.py'), '--out', str(target)], check=True)
     subprocess.run(['cargo', 'test', '--offline', '--manifest-path', str(target / 'Cargo.toml')], check=True, timeout=120)
     subprocess.run(['cargo', 'run', '--offline', '--manifest-path', str(target / 'Cargo.toml'), '--example', 'first_principles'], check=True, timeout=120)
+    subprocess.run(['cargo', 'run', '--offline', '--manifest-path', str(target / 'Cargo.toml'), '--example', 'algorithm_records'], check=True, timeout=120)
 print('消息层：独立工程离线构建、测试与入门示范通过。')

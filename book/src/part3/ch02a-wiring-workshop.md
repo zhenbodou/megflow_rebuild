@@ -109,3 +109,93 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test graph_builder --loc
 先不看答案做两项修改：将 `left/right` 的 TOML 顺序交换，结果仍应为 7；将两处 `ports` 的目标交换，结果应变成 -7，元信息应来自新接到 a 的输入。这能证明你理解的是名字映射，而不是碰巧记住一段顺序。
 
 再读取 `subgraph::flatten`，追踪 `branch:input` 如何变成 `branch/leaf:inp`。这一步发生在上述接线之前，只重写配置，没有创建队列。当前静态压平仍不能覆盖原版子图运行时、资源作用域和动态实例协议，这些是后续必须补齐的开发内容。
+
+## 7. 将类型选择真正接入 Builder
+
+前面的按名接线解决“接到哪个字段”，类型选择解决“队列用什么类型，哪里执行转换”。
+先完成 Ch1.4d 的选择算法，以及宏专题第 10 课的 input_types/output_types，再修改 graph.rs。
+
+新增 `connection_type(g, tx, rx)`。它接收已经按方向拆开的端口引用，不要重新猜测方向：
+
+1. 用节点实例名查注册项。
+2. 发送端查 outputs，接收端查 inputs，找到端口名对应的下标。
+3. 调用同方向的类型信息函数，按下标取 MsgTypeId。
+4. 将发送与接收类型分别收集成 HashSet，交给 guess_channel_type。
+
+这里 `Result<HashSet<_>>` 的收集有两个作用：相同类型自动去重，任意一次查找失败则返回
+错误。若手写注册项的类型列表比名字列表短，也应明确报元信息长度不匹配，而不是越界 panic。
+
+接着修改三处创建队列的位置：
+
+| 连接来源 | 发送类型取自 | 接收类型取自 |
+| --- | --- | --- |
+| 图输入 | 空集合，调用者还没有端点声明 | ports 指向的节点输入 |
+| 图输出 | ports 指向的节点输出 | 空集合 |
+| 内部连接 | 已分类的发送端引用 | 已分类的接收端引用 |
+
+得到类型后，将 `channel(cap)` 改为 `channel_with_type(cap, ty)`。必须先选类型再创建队列，
+随后构造器生成的 `.into()` 才能按正确方向查转换表。只修改注册宏却仍调用旧 channel，
+队列类型一直是 Any，普通具体类型对的转换便不会按预期被选中。
+
+图边界仍允许调用者拿到无类型 Sender/Receiver。它们不会因为调用了泛型 send/recv 就
+自动重新查转换表；需要异类型转换时应使用类型化端点包装。这不等于任意载荷都可以安全发送。
+
+### 用完整 TOML 图验收
+
+`tests/graph_conversion.rs` 定义两个节点：Source 接收并输出 Number，Sink 接收并输出 Text。
+转换属性宏登记 Number → Text，TOML 仅声明 source:out 与 sink:inp 相连，不手动指定队列类型。
+
+运行：
+
+```sh
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test graph_conversion --locked
+```
+
+测试发送 Number(42)，应收到 Text("42")，partial_id 仍为 7。若队列类型选 Number，转换在
+接收侧执行；若选 Text，转换在发送侧执行。原版候选遍历不保证这两个合法类型的固定优先级，
+测试因此检查可观察消息结果，不硬编码转换必须发生在哪一侧。
+
+再将两个节点类型对调，内部连接变成 Text → Number。因为没有登记反向转换，build 应返回
+ChannelTypeMismatch；不应等 start 后再通过 downcast panic 才发现。这个检查只针对当前已有
+端口描述与直接转换关系，不能替代原版跨连接模板变量传播、动态端口和共享子图类型协议。
+
+独立练习：手写反向转换并登记，解释它对非法文本如何处理，再观察反向图是否能建图。
+不要将字符串解析的业务错误与建图的类型兼容问题混为一谈：登记函数存在，只证明可调用，
+不能证明每个实际输入值都能成功解析。
+
+### 混合类型实作：一条边界连接不等于一个节点
+
+再用一个稍复杂的图检验你是否理解类型约束。number 节点原样传递 Number，text 节点
+原样传递 Text；只登记 Number → Text。让它们共同竞争一个图输入，并汇入一个图输出：
+
+```toml
+inputs = [{name="in", cap=1, ports=["number:inp", "text:inp"]}]
+outputs = [{name="out", cap=1, ports=["number:out", "text:out"]}]
+```
+
+先不要运行，手算两条队列的类型：
+
+- 输入队列只能选 Number。Number 消费者直接接收，Text 消费者用 Number → Text 转换；
+  若选择 Text，Number 消费者就需要尚未登记的反向转换。
+- 输出队列只能选 Text。Number 生产者转换后入队，Text 生产者直接入队；
+  若选择 Number，就要求 Text 生产者反向转换。
+
+这里候选是唯一的，因此测试可以明确断言 `input.chan_tid()` 为 Number，
+`output.chan_tid()` 为 Text。和上面的单生产者、单消费者例子相比，多端点增加了约束，
+缩小了可行类型集合。
+
+接下来从图输入发送 0 到 99，每条消息的 partial_id 等于数值。每条消息只被一个节点
+取走：可能直接走 number，也可能转换后走 text。最终输出统一是 Text，结果排序后必须
+恰好是 0 到 99，partial_id 与解析出的数字相等。不能要求两条支路分别收到 50 条，
+队列竞争不提供这种分配保证，也不能要求输出严格保持输入顺序。
+
+现有测试 `mixed_boundary_types_compete_without_losing_or_duplicating_messages` 已实现
+这些断言，和前面两项测试一起运行。容量设为 1，生产和消费并行执行；若先等发送 100 条
+结束再开始读取输出，背压可能让测试永远无法走到读取阶段。
+
+注意测试在取走输入、输出句柄后调用 graph.stop()，但生产者仍持有输入 Sender，
+所以图不会立即停止。生产者完成并释放最后一个 Sender 后，关闭才沿节点输出传播。
+“调用了 stop”与“全部节点已停止”不是同一个事件，需要等待聚合任务确认结束。
+
+这项实验覆盖当前类型转换与多消费者共享队列的组合；没有证明负载公平、全局顺序或
+动态子图协议。验收时应该分别写出这些要求，不能用“100 条都收到了”替代所有并发语义。
