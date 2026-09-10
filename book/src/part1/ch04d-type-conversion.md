@@ -12,11 +12,8 @@
 
 先用一个问题理解需求：节点声明接收 `u32`，但接线系统为队列选择了 `String`。框架至少要记住两件事，才能判断是否存在 String → u32 的转换函数。只记录一个类型，就无法描述这个转换请求。
 
-```rust,ignore
-pub trait TypeInfo {
-    fn port_tid(&self) -> MsgTypeId;
-    fn chan_tid(&self) -> MsgTypeId;
-}
+```rust
+{{#include ../../../code/flow-rs/src/channel.rs:type_info_trait}}
 ```
 
 `port_tid` 描述端口声明：普通端点是 `Any`，`ReceiverT<u32>` 是 Rust 的 u32 类型。`chan_tid` 描述底层通道：类型包装和克隆不会改变它。`Any` 在这里是 MegFlow 枚举的一种值，不是 `std::any::Any` trait，也不代表队列会检查每条消息并改变自己的声明。
@@ -35,16 +32,10 @@ pub trait TypeInfo {
 
 默认未接线端点也采用 Any。随后给普通端点实现 TypeInfo：`port_tid` 返回 Any，`chan_tid` 返回保存的字段。给类型包装实现同一 trait：`port_tid` 返回 `MsgTypeId::of::<T>()`，`chan_tid` 委托内部端点。
 
-可以在测试里运行如下片段：
+这正是 `tests/type_info.rs` 里的回归测试 `wrapper_type_does_not_relabel_channel`（对容量 0、1 各跑一遍，发送、接收两端都验）：
 
-```rust,ignore
-use flow_rs::channel::{channel_with_type, ReceiverT, TypeInfo};
-use flow_rs::config::interlayer::MsgTypeId;
-
-let (_sender, receiver) = channel_with_type(1, MsgTypeId::of::<String>());
-let receiver: ReceiverT<u32> = receiver.into();
-assert_eq!(receiver.port_tid(), MsgTypeId::of::<u32>());
-assert_eq!(receiver.chan_tid(), MsgTypeId::of::<String>());
+```rust
+{{#include ../../../code/flow-rs/tests/type_info.rs:wrapper_test}}
 ```
 
 `receiver.into()` 只是移动端点到类型包装中，不能把 String 队列重新标成 u32。此时两种类型不同是允许被描述的状态，并不意味着接收已经安全可用。下一节接入转换表；如果没有登记匹配转换且实际载荷不是 u32，类型化接收的 downcast 仍会失败。
@@ -66,8 +57,8 @@ assert_eq!(receiver.chan_tid(), MsgTypeId::of::<String>());
 
 上一节先完成类型描述，现在接入实际转换。创建 `channel/conversion.rs`，定义函数指针：
 
-```rust,ignore
-pub type CvtF = fn(SealedEnvelope) -> SealedEnvelope;
+```rust
+{{#include ../../../code/flow-rs/src/channel/conversion.rs:cvt_f_type}}
 ```
 
 输入和输出都被类型擦除，因为一张注册表需要容纳不同类型的转换函数。函数内部负责 downcast 到已约定的输入类型，取出业务数据，构造目标数据，再封箱返回。转换表无法从这个签名判断函数是否遵守注册的类型约定；错误的注册仍会造成运行错误。

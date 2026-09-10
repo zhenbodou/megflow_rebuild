@@ -185,3 +185,93 @@ TemplateInferFault；上层 infer_graph 对该错误有回退到 Any 的处理�
 实际宏已能保留编号；[Ch3.2b](../part3/ch02b-template-inference.md) 已接入静态压平图的
 跨连接推导，替换了此前 Builder 的临时拒绝。模板元数据测试现在检查全模板图的 Any
 回退。端点转换装配已在该节继续接入，原版完整图作用域仍需补齐。
+
+## 8. 把列表语法接入真实宏
+
+字典完成后，再处理原版的 `inp:[T0]`、`out:[u32]`。不要把它理解成 Rust 的定长数组：
+方括号在这里属于端口语言，表示一个名字下可以接多个端点。最终字段是 Vec。
+
+| 声明 | 生成的输出字段类型 | 消息元数据 |
+| --- | --- | --- |
+| `out:[]` | `Vec<Sender>` | Any |
+| `out:[u32]` | `Vec<SenderT<u32>>` | Rust(u32 的 TypeId) |
+| `out:[T0]` | `Vec<Sender>`，另有模板辅助属性 | Template(0) |
+| `out[]` | `Vec<Sender>` | Any，保留早期教学语法 |
+
+### 第一步：在解析冒号后识别方括号
+
+在 PortSpec::parse 中，读取冒号后检查 Bracket，使用 bracketed! 得到内部游标。
+空内容表示没有具体消息类型，否则交给 syn::Type 解析一个类型；检查内部读完，
+然后返回 array=true、dict=false。
+
+为什么不能直接把整个 `[u32]` 当成 syn::Type？那样得到的是 Rust 的切片类型，无法
+直接区分“列表里每个端点收 u32”和“一个端点收某种容器”。端口解析器需要先取出
+自己的容器语法，再解析里面的 Rust 类型。
+
+`[Result<u32, String>]` 内有一个完整类型，应当通过；`[u32; 4]` 是定长数组形式，
+端口列表不支持这个长度；`[u32, String]` 有两个类型，也必须报错。不要只读 u32 就
+忽略剩下的 token。
+
+### 第二步：先判定列表，再选元素类型
+
+字段生成先判断 spec.array。具体载荷选择 SenderT/ReceiverT，模板与 Any 选择
+未类型化端点，再包一层 Vec。只有接下来才处理字典、普通端口。
+
+顺序有意义：如果先看到 payload=u32 就生成 `SenderT<u32>`，列表形态会被丢掉。
+模板编号仍通过 port_field 的 port_template 属性传递，不需要为 Vec 再造一套模板
+编号规则。
+
+### 第三步：派生宏识别类型化列表
+
+port_kind 原来只认识 `Vec<Sender>` 和 `Vec<Receiver>`，现在也要认识元素为
+`SenderT<T>/ReceiverT<T>` 的 Vec。类型描述函数先剥开 Vec，再读端点的载荷类型。
+否则 BuildFromPorts 可能把它当成普通业务参数，从 TOML 中反序列化整个端口字段。
+
+这一逻辑仍按语法结构匹配。`Vec<HistorySender>` 不是输出端口，`Vec<Option<Sender>>`
+也不是本书支持的列表端口形态，不能因为名字中出现 Sender 就误判。
+
+### 第四步：构造时逐元素转换
+
+Builder 交给构造器的是未类型化端点。对于 `Vec<SenderT<u32>>`，不能直接把
+`Vec<Sender>` 填进去；Rust 不会自动将一个容器的所有元素都执行 Into。
+
+生成的普通列表构造表达式改为：
+
+```rust,ignore
+outs.remove(0).into_iter().map(Into::into).collect()
+```
+
+remove 移出整个端口组；into_iter 消费每个端点；Into 根据字段要求变成 SenderT；
+collect 重新组成目标 Vec。未类型化列表也能用同一表达式，元素使用恒等转换。
+
+如果节点同时含字典，生成的 build_tagged 则先取 `.endpoint`，再 `.into()`。
+这条分支也必须更新，否则“只有列表的节点”能编译，“列表加字典的节点”却不能编译。
+
+### 第五步：让内置节点也使用原版声明
+
+Bcast 改为输入 `inp:T0`、输出 `out:[T0]`；Merge 改为输入 `inps:[T0]`、输出
+`out:T0`。这与父目录对应节点的声明一致，并让输入输出的类型关联进入已实现的图
+推导。节点的收发算法与端口语法是不同部分，本次没有借改宏重新定义广播或汇聚行为。
+
+### 第六步：运行并解释验证
+
+下面测试使用类型化列表输入与两个列表输出。必须证明消息到达两路、图能结束、
+两个接收端都观察到关闭；只检查 Vec 长度并不能验证端点转换和生命周期。
+
+```rust,ignore
+{{#include ../../../code/flow-rs/tests/typed_list_ports.rs}}
+```
+
+运行：
+
+```sh
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_list_ports --locked
+cargo test --manifest-path code/Cargo.toml -p flow-derive --locked
+```
+
+独立练习：将 TypedFanout 的 u32 改成 String，同时修改发送数据和断言；再把它改为
+T0，改用 recv_any/send_any。先解释为什么后者不能从字段推断具体 Rust 载荷，再验证
+它是否仍保持两路转发和关闭。
+
+列表和字典都已进入真实宏，但动态端口仍需要 DynPorts 及相关运行时支持。第 3 节
+独立实验打印出的动态字段不能作为动态框架已完成的证据。

@@ -34,63 +34,38 @@ flowchart TD
 - **Ch1.3 的消息**需要一个 `std::any::Any` **给不了**的行为——类型擦除之后**还能克隆**（`Bcast` 要复制封箱消息）。`Any` 的 vtable 里没有 `clone`，所以我们**自定义**了 `AnyEnvelope` trait，手写一个 `clone_box` 塞进 vtable。
 - **本章的资源**没有任何这类需求。节点只想「把它按原类型借出来用」——不需要跨类型的统一操作，不需要 clone 一份资源。**需求决定抽象**：既然不要自定义行为，就别造自定义 trait，直接用标准库的 `Any`。
 
-于是资源句柄就是一行类型别名：
+于是资源句柄就是一行类型别名（以下代码块由 `{{#include}}` 取自 `code/flow-rs/src/resource.rs`，读者照抄即真实源码）：
 
-```rust,ignore
-/// 类型擦除的共享资源句柄。
-/// - `Arc`——多个节点共享同一份（clone 加计数，不拷贝底层）；
-/// - `dyn Any`——抹掉具体类型，好让不同类型的资源塞进同一张表；
-/// - `Send + Sync`——能安全地在（跑在不同 tokio 任务里的）节点间共享。
-pub type AnyResource = Arc<dyn Any + Send + Sync>;
+```rust
+{{#include ../../../code/flow-rs/src/resource.rs:any_resource}}
 ```
 
 还原时的关键动作是 **`Arc::downcast`**（标准库自 1.29 起为 `Arc<dyn Any + Send + Sync>` 提供）：
 
-```rust,ignore
-/// 把类型擦除的资源还原成具体的 `Arc<T>`；类型不符则 `None`。
-pub fn downcast_arc<T: Any + Send + Sync>(r: AnyResource) -> Option<Arc<T>> {
-    r.downcast::<T>().ok()
-}
+```rust
+{{#include ../../../code/flow-rs/src/resource.rs:downcast_arc}}
 ```
 
 > **与 Ch1.3 `downcast_ref` 的又一处对照**：Ch1.3 拆封消息用 `downcast_ref::<T>()`，只借出一个 `&T`——消息拆完即用、不长期持有。资源相反，要**塞进节点字段长期保存**，所以还原出的必须是**带所有权、带共享计数**的 `Arc<T>`，而非借用。`Arc::downcast` 恰好把**整个 `Arc`**（连计数）还原过去：成功得 `Ok(Arc<T>)`，失败把原 `Arc` 原样还回 `Err`；`.ok()` 把我们不关心的「失败分支」丢掉，只留 `Option`。
 
 「怎么造」资源用一个对偶于 `BuildFromPorts` 的 trait 表达，但简单得多——资源没有端口、没有接线，只从配置参数 `args` 造出自己：
 
-```rust,ignore
-/// 「可被引擎构造的资源」——由 resource_register! 注册的类型实现它。
-pub trait BuildResource: Any + Send + Sync {
-    fn build(args: &Args) -> Result<Self>
-    where
-        Self: Sized; // build 按值返回 Self；我们只取 build 的函数指针，从不需要 dyn BuildResource
-}
+```rust
+{{#include ../../../code/flow-rs/src/resource.rs:build_resource}}
 ```
 
 最后把 `T::build` 包成一个**类型擦除**的构造器——这里藏着一个 Rust 新手常踩的**类型推断坑**，值得单独点出：
 
-```rust,ignore
-pub fn build_arc<T: BuildResource>(args: &Args) -> Result<AnyResource> {
-    let r: Arc<T> = Arc::new(T::build(args)?);
-    let any: AnyResource = r; // ← 显式强转点：Arc<T> → Arc<dyn Any + Send + Sync>
-    Ok(any)
-}
+```rust
+{{#include ../../../code/flow-rs/src/resource.rs:build_arc}}
 ```
 
 > **为什么不能一行写成 `Ok(Arc::new(T::build(args)?))`？** 因为「`Arc<T>` → `Arc<dyn Any>`」是一次 **unsize 强转**，编译器只在**有明确目标类型的赋值点**才做它。埋在 `Ok(..)` 里，编译器会先把 `Arc::new(..)` 的类型推成 `Arc<T>`、再期望它「恰好等于」`AnyResource`——而它俩不是同一个类型，强转不会自动发生，报错。解法就是先 `let any: AnyResource = r;` 给一个明确的目标类型，让强转在这一行落地。这类「强转只在标注点发生」的坑，`Box<dyn Trait>` / `Arc<dyn Trait>` 到处都是，记住「给它一个带类型标注的落脚点」即可。
 
 `ResourceCollection` 则是随 `Context` 发给每个节点的那张只读表：
 
-```rust,ignore
-#[derive(Clone, Default)]
-pub struct ResourceCollection {
-    inner: Arc<HashMap<String, AnyResource>>, // 整张表也 Arc 共享：分发给 N 个节点只 clone 外层 Arc
-}
-impl ResourceCollection {
-    pub fn from_map(m: HashMap<String, AnyResource>) -> Self { Self { inner: Arc::new(m) } }
-    pub fn get<T: Any + Send + Sync>(&self, name: &str) -> Option<Arc<T>> {
-        downcast_arc::<T>(self.inner.get(name)?.clone()) // 按名取 → clone 那个 Arc → 还原成 Arc<T>
-    }
-}
+```rust
+{{#include ../../../code/flow-rs/src/resource.rs:collection}}
 ```
 
 注意**两层 `Arc`**各司其职：外层 `Arc<HashMap>` 让「整张表」被 N 个 `Context` 廉价共享（clone 只加计数）；表里每个 value 是 `AnyResource`（又一个 `Arc`），让「每份资源」被 N 个节点共享。表在装配期一次建好后**只读**，没有写竞争，故用朴素 `HashMap` 而非并发容器——读多个 `Arc` 无需加锁。
@@ -167,19 +142,10 @@ Ch3.4 定死的节点生命周期是 `initialize → while !closed { exec } → 
 - 节点在 `initialize(&mut self, ctx)` 里**按名把资源借出来**，存进自己的一个字段；
 - `exec` 直接读那个字段。**`Context` 只作为 `Actor::start` 和 `initialize` 的参数，绝不塞进 `exec`**——Ch3.4 那条 `exec(&mut self)` 签名一个字不改，几十个节点的 `exec` 无感。
 
-`Context` 本身朴素得很：
+`Context` 本身朴素得很（`code/flow-rs/src/context.rs`）：
 
-```rust,ignore
-pub struct Context {
-    pub name: String,                  // 节点实例名（日志/诊断）
-    pub resources: ResourceCollection, // 本图共享资源（Arc 共享，clone 廉价）
-}
-impl Context {
-    pub fn resource<T: Any + Send + Sync>(&self, name: &str) -> Option<Arc<T>> {
-        self.resources.get(name) // 按名+类型借出；查无此名或类型不符 → None
-    }
-    pub fn anonymous() -> Self { /* 空名、空资源——给不经 Builder 的直接 start（测试/沙箱）兜底 */ }
-}
+```rust
+{{#include ../../../code/flow-rs/src/context.rs:context}}
 ```
 
 > **`Context` 为什么必须是 `Send`？** 它要作为参数被 move 进 `tokio::spawn` 的 future（见 `Actor::start`）。`String` 是 `Send`，`ResourceCollection`（内部 `Arc<HashMap<String, Arc<dyn Any + Send + Sync>>>`）是 `Send + Sync`——于是 `Context` 自动 `Send`，spawn 出的节点 future 保持 `Send`。这条要求，正是 §2 里 `AnyResource` 那个 `+ Send + Sync` 边界的用处所在：不是随手加的，是这里必须要。
@@ -190,29 +156,10 @@ impl Context {
 fn start(self: Box<Self>, ctx: Context) -> JoinHandle<Result<()>>;
 ```
 
-节点侧，用一个 `Tally`（计数转发）示范「拿资源」的全套只有三个动作：
+节点侧，用一个 `Tally`（计数转发）示范「拿资源」的全套只有三个动作——① 自有参数 `res` 记下资源名、② `#[state]` 字段存运行期句柄、③ `initialize` 里按名借出（下面是 `code/flow-rs/src/builtin.rs` 里 `Tally` 的真实源码）：
 
-```rust,ignore
-#[inputs(inp)]
-#[outputs(out)]
-#[derive(Node, Actor, BuildFromPorts)]
-pub struct Tally {
-    res: String,                    // ① 自有参数：要借用的资源名（TOML 里 res="counter"）
-    #[state]                        // ② #[state]：不从 args 反序列化，Default(None) 初始化，留给运行期填
-    counter: Option<Arc<Counter>>,
-}
-#[methods]
-impl Tally {
-    async fn initialize(&mut self, ctx: &Context) {
-        self.counter = ctx.resource::<Counter>(&self.res); // ③ 按名借出，存进字段
-    }
-    async fn exec(&mut self) -> Result<()> {
-        let msg = self.inp.recv_any().await?;
-        if let Some(c) = self.counter.as_ref() { c.bump(); } // 有资源才 bump；没有则降级为纯转发
-        if let Some(out) = self.out.as_ref() { out.send_any(msg).await?; }
-        Ok(())
-    }
-}
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:tally}}
 ```
 
 这里的新语法是 **`#[state]`**。它标记「这是个**运行期状态**字段，不是配置参数」。`#[derive(BuildFromPorts)]` 生成构造器 `build` 时，对字段的处理是一串 if-else：是 `Sender`/`Receiver` → 从端口接线来，名叫 `input_closed` → 填 `false`，**否则**当自有参数、去 `args` 里反序列化。`#[state]` 字段插在这串判断的**最前面**：
@@ -293,15 +240,10 @@ connections = [
 ]
 ```
 
-喂 3 条 → `Bcast` 各复制给两路 → 两个 `Tally` 各转发 3 条、各在**同一个**计数器上 `bump()` 3 次。断言的核心是最后一行——图外读回计数器 == **6**：
+喂 3 条 → `Bcast` 各复制给两路 → 两个 `Tally` 各转发 3 条、各在**同一个**计数器上 `bump()` 3 次。断言的核心是最后——图外读回计数器 == **6**。下面是 `tests/resource_e2e.rs` 里这个测试的**完整真实代码**（`{{#include}}` 嵌入，照抄即可运行）：
 
-```rust,ignore
-for _ in 0..3 { got1.push(o1.recv::<i32>().await.unwrap().unpack()); } // 定量收 3
-for _ in 0..3 { got2.push(o2.recv::<i32>().await.unwrap().unpack()); }
-assert_eq!(got1, vec![1, 2, 3]);
-assert_eq!(got2, vec![1, 2, 3]);
-let counter = g.resource::<Counter>("counter").unwrap();
-assert_eq!(counter.get(), 6, "两个节点共享同一个 Counter → 合计 bump 6 次");
+```rust
+{{#include ../../../code/flow-rs/tests/resource_e2e.rs:shared_test}}
 ```
 
 **6 是确定性的，不是碰运气**：`Tally` 的 `exec` 是「**先 bump 再转发**」，所以当我们从 `o1`/`o2` 各收满 3 条时，对应的 6 次 bump 必已全部先于各自的 `send` 完成。若两个节点各造各的 `Counter`，图外这份就从没被 bump 过，读到的会是 0——`6` vs `0`，就是「共享」与「不共享」的判决线。
@@ -312,7 +254,37 @@ assert_eq!(counter.get(), 6, "两个节点共享同一个 Counter → 合计 bum
 
 三个新测试连同全工程 **82 个测试**（较 Ch4.2 的 68 增 14：resource 5 + context 2 + config 2 + flow-derive 2 + e2e 3）一起通过，clippy / fmt / mdbook 全绿。
 
-## 8. 诚实的边界：这一章**没做**什么
+## 8. 本章终点与复现
+
+**起点**：Ch4.2 结束时的工程（`Bcast`/`Merge` 数组端口已就绪，全工程 68 测试）。
+
+**本章新增/改动的文件**：
+
+- `code/flow-rs/src/resource.rs`——`AnyResource`、`downcast_arc`、`BuildResource`、`build_arc`、`ResourceCollection`（本章 §2 各代码块的来源）。
+- `code/flow-rs/src/context.rs`——`Context`（§5）。
+- `code/flow-rs/src/builtin.rs`——`Counter` 资源 + `resource_register!` + `Tally` 节点（§5）。
+- `code/flow-rs/src/config.rs`——`GraphConfig` 加 `resources` 字段、`ResourceConfig`（§4）。
+- `code/flow-derive/src/node.rs`——`#[state]` 辅助属性分支（§5）。
+- `code/flow-rs/src/graph.rs`——`assemble` 造资源、`start` 分发 `Context`、`resource()` 读回（§6）。
+- `code/flow-rs/tests/resource_e2e.rs`——三个 e2e 测试（§7）。
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test resource_e2e --locked
+```
+
+预期三项测试全绿：
+
+```text
+test resource_shared_across_two_nodes ... ok
+test sandbox_tally_without_resource_forwards ... ok
+test unknown_resource_type_is_rejected ... ok
+```
+
+正文里所有资源层代码块与 e2e 测试均由 `{{#include}}` 直接取自上述真实文件，读者照抄或直接运行都是同一份代码。
+
+## 9. 诚实的边界：这一章**没做**什么
 
 - **资源生命周期只有「装配期造、图存续期活」**——没有惰性初始化、没有热重载、没有引用计数归零前的显式释放钩子。真实模型仓可能要「首次用到才加载」或「换模型不重启」，那是另一层机制。
 - **`BuildResource::build` 是同步的**——真实模型加载往往是重 IO / 要 await 的异步操作。本章的 `build(&Args) -> Result<Self>` 同步签名够教学，但接真实异步加载时要改成 async 构造（留待 Part 5 对接真实 API 时谈）。

@@ -122,6 +122,8 @@ connections = [
 
 `flatten` 把 `Config{ main, graphs }` 变成 `Config{ main, graphs: vec![一张扁平图] }`。核心是一个递归的 `expand`，带三件要点。
 
+> **§4~§5 的算法代码是「教学阶段示意」**：下面几段为看清主干做了精简——真实的 `flatten`/`expand`/`resolve_ref` 还要线一个 `HashMap<&str, &GraphConfig>` 图名索引与 `ancestors`/`flat_nodes`/`flat_conns` 三个可变累加器，`expand` 在穿透边界前多一道「空边界端口不被静默抹除」的校验，`resolve_ref` 另有一个「带 `tag` 的子图边界暂不支持（`Error::Unsupported`）」的守卫。**§8「本章终点与复现」把真实的 `flatten`/`expand`/`resolve_ref` 三个函数与全部单元测试整体 `{{#include}}` 进来**，照抄即真源码。
+
 ### 4.1 前缀命名，分隔符为什么必须是 `/`
 
 子图实例 `b1` 内部的节点 `tf`，摊平后叫什么？加实例名前缀：`b1/tf`。嵌套更深就层层叠加：`outer` 里的 `m` 引用子图、`m` 里又有 `leaf` → `m/leaf`。
@@ -211,37 +213,19 @@ let flat = GraphConfig {
 
 ## 6. 端到端：可复用子图共享顶层资源
 
-红→绿的收口测试（`tests/subgraph_e2e.rs`）用的正是 §2 那份配置：`Branch = Transform → Tally` 被实例化两份 `b1`/`b2`，主图一个 `Bcast` 扇出给两份，全图只声明**一个** `Counter`。
+红→绿的收口测试**真实取自** `code/flow-rs/tests/subgraph_e2e.rs`，用的正是 §2 那份配置：`Branch = Transform → Tally` 被实例化两份 `b1`/`b2`，主图一个 `Bcast` 扇出给两份，全图只声明**一个** `Counter`：
 
-```rust,ignore
-let mut g = Builder::default().template(SUBGRAPH_SHARED).build().unwrap();
-let handle = g.start();
-let tx = g.input("in").unwrap();
-let mut o1 = g.take_output("o1").unwrap();
-let mut o2 = g.take_output("o2").unwrap();
-
-for v in [1i32, 2, 3] { tx.send(Envelope::new(v)).await.unwrap(); }
-
-// 定量收每路 3 条（守 Ch4.2 硬教训：图保留对外输入 Sender 直到 stop，不能 drain-到-close）
-let mut got1 = Vec::new();
-for _ in 0..3 { got1.push(o1.recv::<i32>().await.unwrap().unpack()); }
-let mut got2 = Vec::new();
-for _ in 0..3 { got2.push(o2.recv::<i32>().await.unwrap().unpack()); }
-assert_eq!(got1, vec![1, 2, 3]);
-assert_eq!(got2, vec![1, 2, 3]);
-
-// 关键：两份**不同子图实例**里的 Tally 借的是主图**同一个** Counter，各 bump 3 次 = 6
-let counter = g.resource::<Counter>("counter").unwrap();
-assert_eq!(counter.get(), 6, "两份子图实例共享主图同一个 Counter");
-
-drop(tx); g.stop(); handle.await.unwrap().unwrap();
+```rust
+{{#include ../../../code/flow-rs/tests/subgraph_e2e.rs:e2e}}
 ```
+
+> **一处与前文手写示意的落差**：include 的真实测试里 `let o1 = g.take_output("o1")` **不加 `mut`**——因为终点 `Receiver::recv(&self)` 收 `&self`（多消费者竞争接收，Ch1.4 的落差），拿到输出句柄后直接 `o1.recv::<i32>()` 即可。这份 include 一并含**两个** e2e 测试：`reusable_subgraph_shares_top_level_resource`（共享资源，下面详解）与 `subgraph_cycle_is_rejected`（环拒绝，对应下一段）。
 
 `6` 依旧是**确定性**的（`Tally` 先 bump 再转发，故收满 6 条输出时 6 次 bump 必已完成）；若子图实例各造各的计数器，图外这份就是 `0`——`6` vs `0` 就是「跨图（实为压平后同图）共享」成立与否的判决线。这个断言同时证明了两件事：**子图被正确展开、接线**（否则收不到 `[1,2,3]`），以及**资源确实跨实例共享**（否则读不到 6）。
 
 另一个测试守住环：两张图互相引用（`a` 里有个 `ty="b"` 的节点、`b` 里有个 `ty="a"` 的节点）→ `build()` 报 `SubgraphCycle("a")`，在装配前当场拦下，而非爆栈。
 
-`subgraph.rs` 里还有一组单元测试直接钉住压平本身：无子图时恒等、节点带前缀展开、内部边与边界端口重写正确、多层嵌套前缀叠加、环检测、未知边界端口报 `UnknownPort`。连同全工程 **91 个测试**（较 Ch4.3 的 82 增 9：subgraph 单元 7 + e2e 2）一起通过，clippy / fmt / mdbook 全绿。
+`subgraph.rs` 里还有一组单元测试直接钉住压平本身：无子图时恒等、节点带前缀展开、内部边与边界端口重写正确、多层嵌套前缀叠加、环检测、未知边界端口报 `UnknownPort`、空边界不被静默抹除。本章为工程新增 **8 个 subgraph 单元测试 + 2 个 e2e 测试**（§8 全部改 `{{#include}}` 取自真实源码）；`cargo test -p flow-rs` 的总数随后续模块持续增长（终点现为 **139**，见 §8 复现命令），clippy / fmt / mdbook 全绿。
 
 ## 7. 诚实的边界：这一章**没做**什么
 
@@ -249,6 +233,50 @@ drop(tx); g.stop(); handle.await.unwrap().unwrap();
 - **子图不能声明自己的资源**——本教学子集里资源统一由宿主主图提供（§5）。子图作纯拓扑部件。
 - **没有可见性 / 命名空间隔离**——摊平后全是 `b1/tf` 这样的扁平名，靠前缀避免碰撞，但没有真正的「子图内部私有」概念。够用，但不是完整的模块系统。
 - **子图边界端口是「一对一/一对多映射到内部端口」的纯转发**——没有在边界上做类型转换、缓冲策略调整之类的事。边界只是「改个名字、下钻到叶子」。
+
+## 8. 本章终点与复现
+
+**起点**：Ch4.3 结束时的工程（资源层 + `Context` + `resource::<T>` 读回）。
+
+**本章新增/改动的文件**：
+
+- `code/flow-rs/src/subgraph.rs`——新模块：`flatten`（装配前一趟 `Config→Config` 压平）+ 递归 `expand`（前缀命名、空边界校验、祖先链环检测）+ `resolve_ref`/`resolve_refs`/`resolve_ports`（边界端口下钻到叶子）+ 8 个单元测试。
+- `code/flow-rs/src/error.rs`——按需新增 `SubgraphCycle(String)` 变体（另复用既有 `MainGraphNotFound`/`UnknownNode`/`UnknownPort`/`BadConnection`/`Unsupported`）。
+- `code/flow-rs/src/graph.rs`（`Builder::build`）——装配前插一句 `let flat = subgraph::flatten(&config)?;`，`assemble` 拿到的永远是一张扁平图。
+- `code/flow-rs/src/lib.rs`——`pub mod subgraph;`。
+- `code/flow-rs/tests/subgraph_e2e.rs`——2 个 e2e：可复用子图共享顶层资源、互引子图报环（§6 已 include）。
+
+压平算法的真实三函数（含终点已长出的 `HashMap` 图名索引、累加器线程与 `tag` 守卫）：
+
+```rust
+{{#include ../../../code/flow-rs/src/subgraph.rs:flatten_fn}}
+```
+
+```rust
+{{#include ../../../code/flow-rs/src/subgraph.rs:expand_fn}}
+```
+
+```rust
+{{#include ../../../code/flow-rs/src/subgraph.rs:resolve_ref_fn}}
+```
+
+> **与 §4~§5 示意的落差**：真实 `flatten` 先建 `HashMap<&str, &GraphConfig>` 图名索引，再 `expand(main, "", ...)` 递归、用 `resolve_ports` 解析主图对外端口；`expand` 在穿透边界前先校验「未被引用的空边界端口不被静默抹除」（`BadConnection`）；`resolve_ref` 带一个「带 `tag` 的子图边界暂不支持」的 `Error::Unsupported` 守卫（原版 `str2addr` 的地址标签在压平模型里还没有对应的图端口元数据）。主干「前缀命名 + 边界下钻 + 祖先链环检测」与 §4 的示意完全一致。
+
+钉死压平本身的 8 个单元测试（真实取自 `subgraph.rs` 的 `mod tests`）：
+
+```rust
+{{#include ../../../code/flow-rs/src/subgraph.rs:subgraph_tests}}
+```
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --lib subgraph::tests --locked   # 压平 8 个单元测试
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test subgraph_e2e --locked      # 子图 2 个 e2e
+cargo test --manifest-path code/Cargo.toml -p flow-rs --locked                          # 全 flow-rs 回归
+```
+
+预期：subgraph 单元 8 个全绿、e2e 2 个全绿；全 `flow-rs` 现为 **139** 个测试通过（这个总数含 Ch4.4 之后仍在生长的模块，故大于本章叙事里的阶段值，属正常的成品-叙事落差）。
 
 ## 小结
 

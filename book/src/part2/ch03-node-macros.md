@@ -54,24 +54,10 @@ impl Actor for Doubler {
 }
 ```
 
-本章结束时，它塌缩成（真实集成测试见 `flow-rs/tests/derive_node.rs`）：
+本章结束时，它塌缩成（真实集成测试取自 `code/flow-rs/tests/derive_node.rs`）：
 
-```rust,ignore
-#[inputs(inp)]
-#[outputs(out)]
-#[derive(Node, Actor)]
-struct Doubler {}
-
-#[methods]
-impl Doubler {
-    async fn exec(&mut self) -> Result<()> {
-        let mut e = self.inp.recv::<i32>().await?;   // 直接 ? —— 关闭处理交给宏
-        if let Some(out) = self.out.as_ref() {
-            out.send(Envelope::new(e.unpack() * 2)).await?;
-        }
-        Ok(())
-    }
-}
+```rust
+{{#include ../../../code/flow-rs/tests/derive_node.rs:doubler}}
 ```
 
 每一行样板由谁消除，一一对应：
@@ -119,7 +105,7 @@ pub fn inputs(args: TokenStream, item: TokenStream) -> TokenStream {
 - `args` 是属性括号里的内容 `inp`（或 `inp, foo`）——用 `Punctuated::<Ident, Token![,]>::parse_terminated` 解析成「逗号分隔的标识符列表」。
 - `item` 是**整个结构体**（含其下方尚未展开的 `#[outputs]`/`#[derive]` 属性）。
 
-逻辑核心往结构体里塞字段：
+逻辑核心往结构体里塞字段（**单端口阶段示意**：终点源码里 `PortSpec` 还带数组/字典/类型化维度，见 §9）：
 
 ```rust,ignore
 pub fn expand_inputs(names: &[Ident], mut item: ItemStruct) -> TokenStream2 {
@@ -165,7 +151,7 @@ fn named_field(name: Ident, ty: Type) -> Field {
 
 ## 3. `#[derive(Node)]`：按字段类型分类端口
 
-派生宏跑时，属性宏已经把字段都注入好了——所以 `#[derive(Node)]` 看到的是**完整字段列表**。它不需要和属性宏共享状态，只要**按字段类型认出端口**：类型 token 里含 `Sender` 的就是输出端口。
+派生宏跑时，属性宏已经把字段都注入好了——所以 `#[derive(Node)]` 看到的是**完整字段列表**。它不需要和属性宏共享状态，只要**按字段类型认出端口**。下面是**单端口阶段示意**——先用「类型 token 里含 `Sender`」这个粗判据讲清思路，紧接着的引用块会说明它为什么不够、终点怎么改：
 
 ```rust,ignore
 fn output_field_idents(input: &DeriveInput) -> Vec<Ident> {
@@ -215,54 +201,17 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
 
 ## 5. `#[methods]`：改写 impl 块
 
-这是本章最精巧的宏。它要让用户的 `exec` **只写业务逻辑**（`recv().await?` 直接用 `?`），把「收到 `ChannelClosed` 怎么办」的样板藏起来。做三件事：
+这是本章最精巧的宏。它要让用户的 `exec` **只写业务逻辑**（`recv().await?` 直接用 `?`），把「收到 `ChannelClosed` 怎么办」的样板藏起来。做三件事（真实源码取自 `code/flow-derive/src/node.rs`）：
 
-```rust,ignore
-pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
-    // 先扫一遍：用户是否已定义 initialize / finalize
-    let (mut has_init, mut has_final) = (false, false);
-    for it in item.items.iter() {
-        if let ImplItem::Fn(f) = it {
-            match f.sig.ident.to_string().as_str() {
-                "initialize" => has_init = true,
-                "finalize" => has_final = true,
-                _ => {}
-            }
-        }
-    }
-
-    let mut new_items: Vec<ImplItem> = Vec::new();
-    for it in item.items.into_iter() {
-        match it {
-            ImplItem::Fn(f) if f.sig.ident == "exec" => {
-                // ① 原 exec 保留签名与函数体，改名为私有内部方法
-                let mut inner = f.clone();
-                inner.sig.ident = Ident::new("__megflow_exec_inner", f.sig.ident.span());
-                // ② 新 exec 包装：调 inner，吞掉 ChannelClosed → 置标志 + 返回 Ok
-                let mut wrapper = f;
-                wrapper.block = parse_quote!({
-                    match self.__megflow_exec_inner().await {
-                        Err(Error::ChannelClosed) => { self.input_closed = true; Ok(()) }
-                        other => other,
-                    }
-                });
-                new_items.push(ImplItem::Fn(inner));
-                new_items.push(ImplItem::Fn(wrapper));
-            }
-            other => new_items.push(other),
-        }
-    }
-    // ③ 补齐缺失的生命周期默认实现（derive(Actor) 的循环会调它们）
-    if !has_init  { new_items.push(parse_quote!( async fn initialize(&mut self) {} )); }
-    if !has_final { new_items.push(parse_quote!( async fn finalize(&mut self) {} )); }
-    item.items = new_items;
-    quote! { #item }
-}
+```rust
+{{#include ../../../code/flow-derive/src/node.rs:expand_methods}}
 ```
 
 - **① 重命名**：克隆用户的 `exec`（连同函数体），把 `sig.ident` 改成 `__megflow_exec_inner`。这里靠 syn `full` 才能解析和操作 `ImplItemFn`。
 - **② 包装**：新的 `exec` 沿用原签名，函数体换成「调内部方法 + 用 `match` 吞掉 `Err(Error::ChannelClosed)`」。于是关闭发生时，用户 exec 里那个 `?` 抛出的 `ChannelClosed` 被这里接住、转成「置标志 + Ok」，循环下一轮 `is_all_input_closed()` 就会退出——正是 Ch2.1 手写版 `match` 分支干的事，只是移进了宏。
 - **③ 补默认**：用户没写 `initialize`/`finalize` 就补上空实现；写了就保留（单元测试专门验证「自定义的 initialize 不被覆盖」）。
+
+> **一处与叙事进度的落差**：上面 include 的真实源码里，补的默认 `initialize` 签名是 `async fn initialize(&mut self, _ctx: &flow_rs::context::Context)`——那个 `Context` 参数是 Ch4.3「资源与上下文」才引入的（与 `#[derive(Actor)]` 生成的 `initialize(&ctx)` 对齐，见 §4）。本章的心智模型里 `initialize` 还没有它，读作「空上下文占位」即可；`code/` 是全书终点的成品，来龙去脉在 Ch4.3 讲透。
 
 这样，`#[methods]` 让用户的 `exec` 干净得只剩业务逻辑，而 `derive(Actor)` 的循环需要的 `initialize`/`exec`/`finalize` 全都齐备。
 
@@ -295,8 +244,38 @@ use flow_derive::{Actor, Node, inputs, outputs, methods};  // 派生宏 —— �
 
 延续 Ch2.2 的两层测试法：
 
-- **单元测试**（`node.rs` 内，7 个）：直接调 `expand_*`，把生成的 token 转字符串断言。覆盖每个宏：注入了 `inp: Receiver`/`input_closed: bool`、`out: Option<Sender>`；`derive(Node)` 撤输出且读标志、且**不**误撤输入；`derive(Actor)` 生成三段式循环；泛型走 `split_for_impl`；`methods` 包装 exec、补生命周期、且不覆盖用户自定义的生命周期。
-- **集成测试**（`flow-rs/tests/derive_node.rs`，2 个）：用五个宏塌缩出 `Doubler`，真正 spawn、喂 `[1,2,3]`、断言收到 `[2,4,6]`，并验证 `Box<dyn Actor>` 擦除后照样跑（对象安全没丢）。**它逐字节对应 Ch2.1 手写版的两个测试**——证明「宏生成的代码」与「手写的代码」行为完全一致。
+- **单元测试**（`flow-derive/src/node.rs` 内）：直接调 `expand_*`，把生成的 token 转字符串断言。覆盖每个宏：注入了 `inp: Receiver`/`input_closed: bool`、`out: Option<Sender>`；`derive(Node)` 撤输出且读标志、且**不**误撤输入；`derive(Actor)` 生成三段式循环；泛型走 `split_for_impl`；`methods` 包装 exec、补生命周期、且不覆盖用户自定义的生命周期。（这些单元测试连同后续 Ch2.4/4.2/4.3 加进来的数组/字典/模板/`#[state]` 端口分类测试都在同一个 `mod tests` 里，跑 `cargo test -p flow-derive` 可见。）
+- **集成测试**（`flow-rs/tests/derive_node.rs`）：用五个宏塌缩出 `Doubler`，真正 spawn、喂 `[1,2,3]`、断言收到 `[2,4,6]`，并验证 `Box<dyn Actor>` 擦除后照样跑（对象安全没丢）。**它逐字节对应 Ch2.1 手写版的两个测试**——证明「宏生成的代码」与「手写的代码」行为完全一致（真实源码取自 `code/flow-rs/tests/derive_node.rs`）：
+
+```rust
+{{#include ../../../code/flow-rs/tests/derive_node.rs:doubler_test}}
+```
+
+还有一条**反面**证据 `node_close_does_not_erase_business_type_containing_sender`：`§3` 说过端口识别不能靠「类型名里含 `Sender`」的字符串包含，否则一个业务类型 `Option<HistorySender>` 会被 `close()` 误当输出端口撤掉。这条测试就钉死它——`close()` 后业务字段 `history` 必须还在：
+
+```rust
+{{#include ../../../code/flow-rs/tests/derive_node.rs:keeps_state}}
+```
+
+## 9. 本章终点与复现
+
+**起点**：Ch2.2 结束时的工程（会写第一个派生宏，syn `derive` 特性）。
+
+**本章新增/改动的文件**：
+
+- `code/flow-derive/Cargo.toml`——`syn` 依赖升到 `features = ["full"]`（解析 `struct`/`impl`）。
+- `code/flow-derive/src/node.rs`——五个宏的展开逻辑 `expand_inputs`/`expand_outputs`/`expand_derive_node`/`expand_derive_actor`/`expand_methods`，及其单元测试。
+- `code/flow-derive/src/lib.rs`——五个薄入口 `#[proc_macro_attribute]` / `#[proc_macro_derive]`。
+- `code/flow-rs/tests/derive_node.rs`——集成测试：塌缩出的 `Doubler` 端到端 + 对象安全 + 业务类型不误撤。
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test -p flow-derive --manifest-path code/Cargo.toml --locked          # 宏展开单元测试
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test derive_node --locked  # 端到端集成测试
+```
+
+正文里塌缩出的 `Doubler`、`expand_methods` 与集成测试均由 `{{#include}}` 直接取自真实文件。§2~§3 的 `expand_inputs`/`output_field_idents` 代码块仍标注为**示意**——它们展示的是**单端口阶段**的算法骨架（`type_contains` 字符串识别、只注入 `Receiver`/`Option<Sender>`）；终点源码已升级为按语法树精确分类的 `port_kind`，并长出数组/字典/类型化/模板/`#[state]` 端口（Ch2.4、Ch4.2、Ch4.3 陆续补齐），差异见各处「示意」标注与 [Ch2.3a 从手写实现追踪宏展开](ch03b-expansion-walkthrough.md)。
 
 ## 小结
 

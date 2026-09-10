@@ -1,4 +1,4 @@
-# Ch0.3 跑通真实 flow-rs，钉死验收标准
+# Ch0.3 对照原版示例，建立首个验收标准
 
 前两章你建好了心智模型（Ch0.1）与开发骨架（Ch0.2）。这一章要做一件贯穿全书的事：把「我们重写要对齐的**参照系**」固定下来——真实 flow-rs 官方文档里的那个 `BinaryOp`，让 `1 + 2 == 3` 穿过一张图。之后每一章的「绿」，都对着这根基准线量。
 
@@ -8,7 +8,7 @@
 
 ## 0. 本章要钉死什么
 
-- **参照系 = 真实 flow-rs 的 BinaryOp `1 + 2 == 3`。** 它来自原版引擎 `flow-rs/src/lib.rs` 顶部那段官方「Getting started」文档——四步上手。这四步就是本书要对齐的目标 API 面。
+- **参照系 = 真实 flow-rs 的 BinaryOp `1 + 2 == 3`。** 它来自原版引擎 `flow-rs/src/lib.rs` 顶部那段官方「Getting started」文档——四步上手。这些示例帮助提取行为契约；重构允许调整公开 Rust API，不要求原版调用代码不经修改就编译。
 - Ch0.1 已经**剧透**过其中两块（节点长相 + 建图那段 `main`），让你混了个眼熟。本章比 Ch0.1 **更深**：把四步**逐段拆开**讲清每一行背后的机制，**补上** Ch0.1 没覆盖的 Step 2（Sandbox 单节点测试），最后产出一张**验收契约表**——Ch2.3（节点宏）、Ch3.4（端到端）都回来对照它。
 - 顺带把一件容易误解的事讲透：**原版为什么在你的机器上跑不动**，以及这对我们的重写意味着什么依赖边界。
 
@@ -19,15 +19,15 @@
 1. **Step 1 定义节点插件**——写一个能干活的小节点（本书对齐目标，Part 2 亲手实现）。
 2. **Step 2〔可选〕用 Sandbox 单独测节点**——不建整张图，把单个节点拎出来喂数据、验结果（本书对齐目标，Ch3.4 实现）。
 3. **Step 3 描述拓扑、建图跑通**——用 TOML 描述图，`Builder` 装配，送进 `1`、`2`，读回 `3`（本书对齐目标，**Ch3.4 里程碑**）。
-4. **Step 4〔可选〕打包成 C/Python 插件**——把插件随框架打包分发。**这是本书的非目标**（见 spec §6），下面提一句其存在、不展开。
+4. **Step 4〔可选〕打包成 C/Python 插件**——把插件随框架打包分发。**这是本书的非目标**（见本书前言的范围），下面提一句其存在、不展开。
 
-前三步是我们要一比一对齐的；第四步是边界之外。下面逐段拆。
+前三步展示的业务行为属于目标；具体宏拆分和方法签名允许重新设计。第四步的 Python/C 打包不在范围内。下面只阅读原版示例，不把它们写进当前空骨架。
 
 ## 2. 逐步拆解四步示例
 
 ### 2.1 Step 1：定义一个节点插件
 
-这一段 Ch0.1「剧透」里你见过。这里**照着原版源码逐行讲**它每一块干什么（代码与原版逐字对齐，注释保留原版英文并补中文）：
+这一段 Ch0.1「剧透」里你见过。这里**照着原版源码逐行讲**它每一块干什么（以下为加注释的阅读版本，不声称逐字复刻）：
 
 ```rust,ignore
 use anyhow::Result;
@@ -91,7 +91,7 @@ node_register!("BinaryOp", BinaryOp);
     - `ea.unpack()` / `eb.unpack()`：把「信封 `Envelope`」拆开，取出里面的 `i32` 值。（`Envelope` 是消息在图里流动时的载体，Ch1.3 实现。）
     - `ea.repack(result)`：**复用**收到的那个信封 `ea`，只把里面的载荷换成运算结果——这样帧序号等元信息能顺着传下去，比新建一个信封更省。换好的信封通过 `self.c.send(...).await` 发到输出端口 `c`。
     - 末尾 `.ok()`：`send` 也可能因下游关闭而失败，这里选择忽略该错误。
-  - **`node_register!("BinaryOp", BinaryOp)`**：把「类型名字符串 `"BinaryOp"`」和「Rust 类型 `BinaryOp`」的对应关系登记进**编译期注册表**。之后 TOML 里写 `ty="BinaryOp"`，框架就能靠这张表找到构造器、把节点造出来。（Ch2.4 用 `inventory` 实现这张表。）
+  - **`node_register!("BinaryOp", BinaryOp)`**：把「类型名字符串 `"BinaryOp"`」和「Rust 类型 `BinaryOp`」的对应关系登记进**分散注册表**。之后 TOML 里写 `ty="BinaryOp"`，框架就能靠这张表找到构造器、把节点造出来。（Ch2.4 用 `inventory` 实现这张表。）
 
 > 一句话记住这个节点：**`recv → 算 → send`，装在一个被框架反复调用的 `async fn exec` 里**。这就是整个 dataflow 引擎里「一个环节」的最小形态。
 
@@ -241,57 +241,43 @@ outputs=[{name="c",cap=16,ports=["add:c"]}]
 
 ### 2.4 Step 4〔可选，非目标〕：打包成 C/Python 插件
 
-原版文档的第四步是「把插件随框架打包」，用的是内部工具 megflow-pack，产出可被 C / Python 加载的形式。**这是本书的非目标**（见 spec §6：C FFI 与 Python 加载不在重写范围内），这里提一句它的存在即可，正文不展开。我们的重写心智模型里，节点就是 Rust 代码，跑在 Rust 引擎上。
+原版文档的第四步是「把插件随框架打包」，用的是内部工具 megflow-pack，产出可被 C / Python 加载的形式。**这是本书的非目标**（C FFI 与 Python 加载不在重写范围内），这里提一句它的存在即可，正文不展开。我们的重写心智模型里，节点就是 Rust 代码，跑在 Rust 引擎上。
 
 ## 3. 动手：在你的环境验证
 
-按理说，参照系最好能在你机器上真跑起来当「活参照」。但**原版引擎仓在一套 stock（纯 crates.io）工具链上是构建不起来的**——这不是 bug，而是它作为公司内部工程的依赖边界。诚实地把这条边界钉清楚，正是本节的目的。
+本章使用父目录 `../megflow` 的固定提交 `95f870bfefd48fa31f9cf88320de4cc177985c72`。从教材仓库根目录执行以下只读命令：
 
-**怎么证实（不必真去构建）**：直接读原版的 `flow-rs/Cargo.toml`，就能看到私有依赖。关键片段形如：
-
-```toml
-[dependencies.minstant]
-version = "0.1.7"
-features = ["atomic"]
-registry = "megvii"          # ← 私有注册表，crates.io 上没有、外部拉不到
-
-[dependencies.petgraph]
-version = "0.6.2"
-registry = "megvii"
-
-[dependencies.flow-derive]
-path = "../flow-derive"
-version = "0.8.37"
-registry = "megvii"
-
-[build-dependencies]
-bindgen = "0.59"             # ← 构建期还要 bindgen 生成 C 绑定
+```bash
+git -C ../megflow rev-parse HEAD
+git -C ../megflow show 95f870bfefd48fa31f9cf88320de4cc177985c72:flow-rs/src/lib.rs
+git -C ../megflow show 95f870bfefd48fa31f9cf88320de4cc177985c72:flow-rs/Cargo.toml
 ```
 
-事实（已核对原版源码）：
+第一条用于检查本地工作副本的版本；后两条始终读取指定提交，不随工作树漂移。输出首行提交应与上面的固定值一致；若不同，不需要切换或改写原仓库，继续使用带提交号的 git show。
 
-- **原版引擎仓里有 22 处 `registry = "megvii"`** 的私有依赖（分布在 flow-rs(6) / flow-message(4) / flow-plugins(6) / flow-cffi(3) / flow-python(3) 五个 crate 的 `Cargo.toml`；`flow-derive` 自身**没有**私有依赖）。单看 `flow-rs/Cargo.toml` 就有 6 处：`minstant`、`petgraph`、`templar`、`glider-monitor`、`devtools-exporter`、以及连自家的 `flow-derive` 都**经**私有注册表拉取（是 flow-rs 的依赖行写了 `registry = "megvii"`，并非 flow-derive 自己有私有依赖）。
-- 另有几项**可选**依赖：`blob-proxy`（在 flow-message / flow-plugins 里，`registry = "megvii"` 且 `optional = true`——flow-rs 本身并不依赖它）；以及 flow-rs 的 `pyo3` / `stackful` / `numpy`（`optional = true`，藏在 `python` / `cplugin` feature 后，**都是 crates.io 公共 crate**、不走私有注册表）。构建期另有个公共 build-dep `bindgen`（真正门槛是系统 libclang，而非「拉不到」）。
-- **真正卡住构建的是那批非可选的 `registry = "megvii"` 依赖**——flow-rs 里的 `minstant` / `petgraph` / `glider-monitor` / `templar` 与私有拉取的 `flow-derive` 默认就参与构建，而它们 crates.io 上没有、外部机器拉不到。所以在没有 megvii 内网与注册表凭证的机器上，`cargo build` / `cargo test` 会在**解析/拉取依赖**这一步就失败，形如（示意）：
+原版 manifest 中存在 `registry = "megvii"`。这表示依赖被指定到该注册表，不能由此推断 crates.io 没有同名包，也不能把公开同名版本直接当成等价替换。带 path 的依赖还需要结合本地路径解析，optional 依赖需要结合 feature 判断。
 
-```text
-error: failed to query replaced source registry `megvii`
-  (or) error: no matching package named `minstant` found in registry `megvii`
-```
+我们未以成功运行原版二进制作为本章证据。源码、原测试输入与断言是可取得的依据；无法取得的私有实现，后续用本地纯 Rust 等价实现并测试调用点协议。未执行的原版结果不能写成“差分运行已通过”。
 
-> **本书作者没有在原版仓运行 cargo**——原版仓 `/data/algorithm_warehouse/bw100_dev/megflow` 对本书**严格只读**，连它的 `Cargo.lock` 都不去改动。上面的边界是**读 `Cargo.toml` 直接看出来的**，无需真跑构建即可确认。
+请建立一条自己的验收记录：
 
-**这条边界的含义**：
+| 字段 | BinaryOp 的首个记录 |
+|---|---|
+| 原版证据 | 固定提交的 flow-rs/src/lib.rs 上手示例 |
+| 输入 | op 为 +，a 为 i32 的 1，b 为 i32 的 2 |
+| 输出 | c 的载荷为 i32 的 3 |
+| 元信息 | 结果通过左侧 ea.repack 构造，应保留左侧信封元信息 |
+| 错误边界 | 示例忽略发送错误；除零与非法运算符还需单独测试 |
+| 生命周期 | 必须单独验证输入关闭、输出排空与任务退出 |
+| 重构验收 | Ch3.4 的端到端测试；不能只以编译通过验收 |
 
-- **原版需内部注册表方能构建；本书以其源码为参照系。** 我们把它的 `lib.rs`、`tests/*` 当作「标准答案」来读、来对齐，而不是把它编译运行当活参照。
-- **我们的重写只用 crates.io 公共依赖，从 Ch1.1 起白手起家。** crate 名沿用 `flow-rs` / `flow-message` / `flow-derive`，edition 用 2021，stable 工具链——任何人一套 stock 环境就能完整复现（这与 Ch0.2 §3.4「只用 crates.io、edition 2021」是同一口径）。
-- 顺带澄清一个常见误解：闭源的 `pplcore-*` / `mpp` 全家桶**不在引擎仓里**——它们属于引擎**之上**的算法仓 / 视觉硬件层（见 spec §6 与 Ch5.1 的边界讨论）。所以「原版难以构建」的**直接**原因只有一个：**那批非可选的 `registry = "megvii"` 私有依赖**（`minstant` / `petgraph` / `glider-monitor` / `templar` + 私有拉取的 `flow-derive`）。`pyo3` / `stackful` 只是可选的公共 crate、`bindgen` 只是需要 libclang 的公共 build-dep，都不是拦路主因；更不要把 `pplcore` / `mpp` 记成引擎仓的直接依赖。
+不看实现先预测：如果只发送 a，测试是否应该立即得到结果？不应该，节点还在等 b。若验证没有设置超时，错误实现可能让测试永远挂起。之后写异步测试时，要同时给出正确输出和退出条件。
 
 ## 4. 验收标准契约表
 
-下面这张表，是**全书的验收目标契约**——把参照系（真实 flow-rs 的 BinaryOp）用到的 API 面一条条列清：**它长什么样、出自哪、本书在哪一章把它实现并验收**。Ch2.3（节点宏）、Ch3.4（端到端）都回来对照这张表判断自己是不是「绿」了。
+下面这张表，是**原版入门示例的接口阅读索引**——把参照系（真实 flow-rs 的 BinaryOp）用到的 API 面一条条列清：**它长什么样、出自哪、本书在哪一章把它实现并验收**。Ch2.3（节点宏）、Ch3.4（端到端）都回来对照这张表判断自己是不是「绿」了。
 
-spec §2.2 把**核心实现**定为 **8 个宏**。其中 **7 个是节点写法宏**，先单独列出来（这是 Part 2 的主线产物）；第 8 个 `#[add_cvt_func]` 属类型转换、不用于节点写法，见表下说明。
+先列出示例出现的七种宏写法。这不是整个项目的宏清单，也不是限定重构只需实现七个宏。表中的章节是学习入口，不代表原版签名已原样实现。
 
 | # | 节点写法宏 | 作用 | 实现于 |
 |---|---|---|---|
@@ -303,23 +289,23 @@ spec §2.2 把**核心实现**定为 **8 个宏**。其中 **7 个是节点写�
 | 6 | `#[amain]` | 异步 `main` 入口宏 | Ch2.4 |
 | 7 | `#[atest]` | 异步测试宏（Sandbox 测试用） | Ch2.4 |
 
-> 这 7 个是**节点写法宏**；再加上 `#[add_cvt_func]`（类型转换函数注册，用在 Ch4.1），才凑齐 spec §2.2 点名的 **8 个「核心实现」宏**——`#[add_cvt_func]` 因不用于节点写法，没列进上表。其余的 `#[derive(Actor)]` / `#[derive(Parser)]` / `opt_register!` / `resource_register!` / `submit!` / `feature!` **不在**核心集内，按需最小实现或末章指路。
+> `#[add_cvt_func]`、资源注册、Actor 派生、配置解析和优化器相关宏也属于目标内知识。需要从原版四个 crate 的实际使用点逐项验收，不能把未讲解的项目宏留作末章自行探索。宏专题负责解释展开机制，运行时章节负责验证展开后的行为。
 
 再看**类型 / 建图 / 运行 / 测试 / 配置**这一组契约（`M` 泛指消息类型）：
 
 | 契约项 | 长什么样（写法 / 签名） | 出自 | 实现 / 验收于 |
 |---|---|---|---|
-| 节点方法集 | `fn new(_: String, args: &Args) -> Self`；`async fn exec(&mut self)`；可选 `async fn initialize(&mut self, _: &Context, _: ResourceCollection)`、`async fn finalize(&mut self)` | lib.rs 示例 + spec §2.2 | Ch2.1 / Ch2.3（`initialize`/资源见 Ch4.3） |
-| `Envelope<M>` | `Envelope::new(m)`；`unpack(&mut self) -> M`；`repack<T>(&self, T) -> Envelope<T>`；`repack_inplace(&mut self, M)` | flow-rs `envelope` + spec §2.2 | Ch1.3 |
+| 节点方法集 | `fn new(_: String, args: &Args) -> Self`；`async fn exec(&mut self)`；可选 `async fn initialize(&mut self, _: &Context, _: ResourceCollection)`、`async fn finalize(&mut self)` | lib.rs 示例 | Ch2.1 / Ch2.3（`initialize`/资源见 Ch4.3） |
+| `Envelope<M>` | `Envelope::new(m)`；`unpack(&mut self) -> M`；`repack<T>(&self, T) -> Envelope<T>`；`repack_inplace(&mut self, M)` | flow-rs `envelope` | Ch1.3 |
 | 建图 | `Builder::default().template(TOML).build()?` → `MainGraph` | lib.rs 示例 | Ch3.2 / Ch3.4 |
 | 图对外端口 | `graph.input::<T>(name)` / `graph.output::<T>(name)`（单个泛型方法，类型可推断时省 turbofish，如示例里的 `graph.input("a")`） | lib.rs 示例 + `tests/01-subgraph.rs` | Ch3.4 |
 | 启动 / 停机 | `graph.start() -> handle`；`graph.stop()`；`handle.await?` | lib.rs 示例 | Ch3.3 |
 | 全局收尾 | `flow_rs::finalize().await`（**≠** 节点的 `finalize` 钩子） | lib.rs 示例 | Ch3.3 / Ch3.4 |
 | 图外收发 | `port.send(Envelope::new(v)).await?`；`port.recv::<T>().await`；`port.close()` | lib.rs 示例 + `tests/01-subgraph.rs` | Ch1.4 / Ch3.4 |
 | Sandbox（单节点测试） | `Sandbox::with_args("BinaryOp", args)`；`add_data("a", \|i\| Option<T>)`；`add_check("c", \|v: T\| assert...)`；`start().await` | lib.rs 示例 | Ch3.4 |
-| TOML schema | `main="..."`；`[[graphs]]` + `name`；`nodes=[{name, ty, ...args}]`；`inputs`/`outputs=[{name, cap, ports}]`；端口引用 `"节点名:端口名"`；`cap`=channel 容量 | lib.rs 示例 + spec §2.2 | Ch3.1 |
+| TOML schema | `main="..."`；`[[graphs]]` + `name`；`nodes=[{name, ty, ...args}]`；`inputs`/`outputs=[{name, cap, ports}]`；端口引用 `"节点名:端口名"`；`cap`=channel 容量 | lib.rs 示例 | Ch3.1 |
 
-**⭐ 一句话钉死本章与 Ch3.4 的分工**：上表里所有 API「长什么样」由**本章（Ch0.3）**钉死；让 `1 + 2 == 3` **真正端到端跑出 `3`** 是 **Ch3.4** 的验收（那是本书第一个「完整框架」里程碑）。本章不负责让它跑，只负责让你——和后续章节——都清楚「要对齐的到底是什么」。
+本章记录原版接口用于阅读对照；Ch3.4 使用重构版接口验证第一条执行链。BinaryOp 通过不代表完整框架、全部宏或停机协议已经完成。
 
 ### 旁证：真实集成测试也是这个形状
 
@@ -356,14 +342,10 @@ handle.await?;
 
 可以看到与四步示例**完全同款**的 `Builder::default().template(...).build()`、`graph.input/output`、`start`、`Envelope::new`、`send`/`recv`、`handle.await`。额外还露出两个后面会讲的点：多个 `[[graphs]]` + `connections` 描述**子图**（Ch4.4）、`recv` 在 channel 关闭后返回 `Err`（通道关闭语义，Ch1.4/Ch3.3）。这些都会进各自章节的验收，本章先记下它们属于同一张契约。
 
-## 小结
+## 本章验收与下一步
 
-这一章我们把**参照系钉死了**：
+本章不新增 Rust 文件，没有需要伪装成可编译程序的原版片段。完成后，你应能独立找出固定提交的证据、写明输入输出、分清源码推断与实际运行结果，并说明为什么只断言 3 还不足以证明消息元信息和任务回收正确。
 
-- 逐段拆解了原版 `lib.rs` 的**四步上手**——定义节点（Step 1）、Sandbox 单节点测试（Step 2，Ch0.1 没讲的一步）、建图跑通 `1 + 2 == 3`（Step 3），以及非目标的打包（Step 4，仅提及）。
-- 讲清了**依赖边界**：原版默认构建卡在那批非可选的 `registry = "megvii"` 私有依赖上（共 22 处私有依赖分布在 flow-rs/flow-message/flow-plugins/flow-cffi/flow-python；`pyo3`/`stackful` 只是可选公共 crate、`bindgen` 只是需 libclang 的公共 build-dep，都非主因），外部跑不动；我们以它的源码为标准答案，重写只用 crates.io、从 Ch1.1 白手起家。
-- 产出了**验收契约表**：spec §2.2 的 8 个核心宏（7 个节点写法宏 + `#[add_cvt_func]`）+ `Envelope`/建图/运行/`Sandbox`/TOML schema 的完整 API 面，逐条标注了「本书在哪实现」。并明确：`1 + 2 == 3` 端到端跑出 `3` 是 **Ch3.4** 的验收，本章只钉「长什么样」。
+练习：把首个记录扩展为减法、乘法、除法和非法运算符五类输入；对每类分别写出载荷、错误或 panic、输出数量以及退出条件。先依据原版实现预测，再在 Ch3.4 编写重构验收测试，不能把你更喜欢的错误处理当成原版行为。
 
-读到这儿，你应该能一口气说清：**「我们最终要让什么代码跑出 `3`」，以及为什么原版跑不动、我们却能从零复现。** 参照系立好了。
-
-**Part 0 到此结束。** 下一章进入 **Part 1（Ch1.1）**：从并发下的所有权/借用/生命周期与错误处理开始，动手写引擎的第一块地基——一路向着上面这张契约表施工。
+接着阅读[完整性验收账本](ch04-completeness-audit.md)和[从看懂代码到独立开发](ch05-learn-to-build.md)，再进入 Part 1。

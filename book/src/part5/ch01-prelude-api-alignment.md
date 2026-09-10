@@ -31,31 +31,13 @@ use flow_rs::prelude::*;
 
 ## 2. 我们的 `prelude`
 
-`flow-rs/src/prelude.rs` 全文就是一组 `pub use`——门面模块**不定义任何东西**，只是把别处的名字重新导出到一处:
+`flow-rs/src/prelude.rs` 全文几乎就是一组 `pub use`——门面模块**几乎不定义任何东西**（只有一个 `Arg` 类型别名），只是把别处的名字重新导出到一处（真实源码）:
 
-```rust,ignore
-//! flow-rs · prelude —— 一行导入常用名字的门面。
-
-// ── 消息 ──
-pub use flow_message::Envelope;
-
-// ── 过程宏（flow-derive）──
-pub use flow_derive::{
-    inputs, methods, node_register, outputs, resource_register, Actor, BuildFromPorts, Node,
-    TypeName,
-};
-
-// ── 引擎类型与函数 ──
-pub use crate::channel::{channel, Receiver, Sender};
-pub use crate::config::Args;          // 资源作者写 `BuildResource::build(args: &Args)` 要命名它
-pub use crate::context::Context;
-pub use crate::error::{Error, Result};
-pub use crate::graph::{Builder, MainGraph};
-pub use crate::node::{Actor, Node};        // trait 形态
-pub use crate::registry::BuildFromPorts;   // trait 形态
-pub use crate::resource::BuildResource;
-pub use crate::sandbox::Sandbox;
+```rust
+{{#include ../../../code/flow-rs/src/prelude.rs:prelude_facade}}
 ```
+
+> **与本节早期示意的落差**：真实门面比「三组各挑一两个代表」长——消息组从 `crate::envelope`（一个 `pub use flow_message::envelope::*` 的**原版兼容路径**，对齐原版的 `super::envelope`）一次带出 `Envelope`/`SealedEnvelope`/`AnyEnvelope`/`EnvelopeInfo`/`DummyEnvelope`/`str2addr`；宏组多一个 `add_cvt_func`（Ch4 类型转换表）；channel 组多 `SenderT`/`ReceiverT`/`TypeInfo`/`BatchRecvError`（Ch1.4c/d 的类型化端点与限时批量）。**最值得注意的是末尾两行** `interlayer::{MsgType, MsgTypeId, PortInfo, PortType}` 与 `Arg`——它们正是 §4 要专门讨论的、后来「补进门面」的原版端口类型描述（下面的对照因此需要更新）。
 
 分三组，每组对应一类作者的需求:
 
@@ -96,7 +78,7 @@ flowchart LR
 
 各取所需，天然错开。这正是 `serde` 让 `Serialize` **既是**派生宏（`#[derive(Serialize)]`）**又是** trait（`T: Serialize`）的同款套路——我们在 Ch2.3、Ch2.4 里已经反复用到，这里只是把它明确写进 prelude 的设计说明。`TypeName` 是个例外:它的派生宏生成的是**固有方法**（`impl Foo { fn type_name() }`，见 Ch2.2），不依赖任何 trait，所以门面里只有它的**宏**形态、没有对应 trait。
 
-## 4. 对齐原版:原版 prelude 更大，而「大出来的部分」正是闭源边界
+## 4. 对齐原版:原版 prelude 更大——多出的几行，量的是边界，也是接口面
 
 原版 `flow_rs::prelude`（内联在其 `lib.rs` 里）长这样:
 
@@ -125,16 +107,24 @@ pub mod prelude {
 
 **第一，共同的骨架完全对得上。** channel / envelope / graph / node / registry / resource / Builder / flow_derive 的宏——这些我们都有，名字和角色一一对应。`Args` 连定义都一样（`toml::value::Table`，我们在 Ch3.1 就注明了「原版也用它」）。这说明我们纵切下来的这条主干，和原版是同一套心智模型:**下游作者从原版切到我们这版，`use flow_rs::prelude::*;` 起手这件事一模一样。**
 
-**第二，原版「多出来的那几行」，恰好是我们从第一天就划出去的非目标。** 逐个看:
+**第二，原版「多出来的那几行」里，三行是我们从第一天就划出去的非目标，另两行我们反倒补上了。** 先看三个**真·非目标**:
 
 | 原版 prelude 多出的项 | 它是什么 | 我们为什么没有 |
 |---|---|---|
 | `broker::*` | **动态子图**运行时——运行期按流条数生成 N 套管线 | Ch4.4 划出:我们只做静态 `flatten`，动态子图需要嵌套运行时 |
 | `rt` | 包在 tokio 外的运行时层:`spawn_pinned`（把 `!Send` 任务钉到本地线程）、带超时重试的自定义 `RwLock`、死锁计数 | 这些能力是为 **FFI / Python / C 插件**里的 `!Send` 与阻塞调用服务的（Ch5.2 细讲）——我们没这些需求，直接用 tokio |
 | `config::optimizer` | **图优化器**:自动插 buffer / mem_pool / skip 节点等 pass | 非目标，Ch5.3 指路 |
-| `config::interlayer::{MsgType, MsgTypeId, PortInfo, PortType}` | **运行期**算出来的端口类型信息 | 我们的端口名表是**编译期** `&'static`（Ch3.2），不需要运行期端口类型层 |
 
-换句话说，**原版 prelude 的「大」，量出的正是那条闭源/高级特性边界**。我们的 prelude 小一圈，不是偷懒，是它忠实地反映了「这本书的引擎 = 核心子集」这个从 Ch0.2 就定下的范围。门面的大小，就是范围的尺子。
+这三项**确实没有**——broker（动态子图）、rt（FFI 运行时）、optimizer（图优化器），全是 Ch0.2 就划出去的闭源/高级特性。**原版 prelude 比我们大的这一截，量出的正是那条边界。**
+
+但还有两行，我们**补上了**——就是 §2 include 里那末两行 `config::interlayer::{MsgType, MsgTypeId, PortInfo, PortType}` 与 `Arg`:
+
+| 原版 prelude 多出、我们**也补了**的项 | 它是什么 | 我们的状态 |
+|---|---|---|
+| `interlayer::{MsgType, MsgTypeId, PortInfo, PortType}` | 描述端口形态（Unit/List/Dict/Dyn）与消息载荷类型的一层 | 门面里**已导出**——但只是**接口就位**，Builder 尚未全面切到带标签的 `Port` 接线 |
+| `Arg` | 单个 TOML 参数值 `toml::value::Value`（`Args` 是整张参数表，别混淆） | 已导出 |
+
+**这里要把一件事划清楚**:把 `interlayer` 的类型导进门面，**不等于**字典端口 / Demux / 动态实例已经能用——那还要宏、注册、接线、运行时的完整配合（本章末尾「端口描述与带标签引用」一节专门讲这条「接口存在 ≠ 接线完成」的界线）。所以我们的 prelude 在**接口面**上比早期设想更贴原版，但**功能边界**（broker / rt / optimizer，以及 `interlayer` 背后尚未接通的动态能力）仍在 Ch0.2 那条线上。门面的大小对齐了原版的接口，**能力**的大小才是范围的尺子。
 
 还有两处**有意的小差异**:
 
@@ -172,80 +162,32 @@ flowchart TD
 
 门面好不好，标准只有一个:**下游是不是真的只需这一行就够了**。我们写一个集成测试 `tests/prelude.rs`，通篇**只有** `use flow_rs::prelude::*;`（外加标准库的 `Arc`，它不属于本引擎），却要完成①定义并注册一个**资源**、②定义并注册一个**节点**、③用 `Builder` 搭图、跑图、图外读回资源——真实下游三类作者（资源/节点/app）的活儿全覆盖:
 
-```rust,ignore
-use flow_rs::prelude::*;
-use std::sync::Arc;   // 唯一的额外导入:节点持有 Arc<资源> 句柄，Arc 属标准库、非本引擎
-
-// —— 只靠 prelude 定义一份资源 ——
-#[derive(Default)]
-struct Bag { seen: std::sync::atomic::AtomicU64 }
-impl Bag {
-    fn bump(&self) { self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-    fn get(&self) -> u64 { self.seen.load(std::sync::atomic::Ordering::Relaxed) }
-}
-impl BuildResource for Bag {                    // ← trait 来自 prelude
-    fn build(_args: &Args) -> Result<Self> { Ok(Bag::default()) }   // ← Args / Result 来自 prelude
-}
-resource_register!("PreludeBag", Bag);          // ← 宏来自 prelude
-
-// —— 只靠 prelude 定义一个节点 ——
-#[inputs(inp)]                                   // ← 属性宏来自 prelude
-#[outputs(out)]
-#[derive(Node, Actor, BuildFromPorts)]           // ← 派生宏来自 prelude
-struct PreludeTally {
-    res: String,
-    #[state] bag: Option<Arc<Bag>>,
-}
-#[methods]
-impl PreludeTally {
-    async fn initialize(&mut self, ctx: &Context) {   // ← Context 来自 prelude
-        self.bag = ctx.resource::<Bag>(&self.res);
-    }
-    async fn exec(&mut self) -> Result<()> {
-        let mut env = self.inp.recv::<i32>().await?;
-        let v = env.unpack();
-        if let Some(b) = self.bag.as_ref() { b.bump(); }
-        if let Some(out) = self.out.as_ref() {
-            out.send(Envelope::new(v + 1)).await?;    // ← Envelope 来自 prelude
-        }
-        Ok(())
-    }
-}
-node_register!("PreludeTally", PreludeTally);
+```rust
+{{#include ../../../code/flow-rs/tests/prelude.rs:prelude_authoring}}
 ```
 
 测试主体喂 `[10, 20, 30]`、定量收 3 条、断言得到 `[11, 21, 31]`（节点端到端 +1）、再从图外读回 `bag.get() == 3`（资源被门面定义的节点正常共享），最后 `drop(tx); g.stop(); handle.await`——守的还是 Ch4.2 那条硬教训:**定量收 → drop 克隆 → stop → await**，绝不 drain-到-close。
 
 除了这个能跑的用例，文件末尾还有一组**编译期完备性检查**——一批永不被调用、但只要**能编译**就证明对应名字在作用域里的 item:
 
-```rust,ignore
-#[derive(TypeName)]                              // 证明 TypeName 派生宏在作用域
-struct _PreludeName {}
-
-#[allow(dead_code)]                              // 证明四个 trait 都在作用域
-fn _traits_in_scope<N: Node, A: Actor, B: BuildFromPorts, R: BuildResource>() {}
-
-#[allow(dead_code)]                              // 证明四个类型名都在作用域
-fn _types_in_scope(_a: Error, _b: Sandbox, _c: MainGraph, _d: Context) {}
-
-#[allow(dead_code)]                              // 证明 channel 函数 + Sender/Receiver 在作用域
-fn _channel_in_scope() -> (Sender, Receiver) { channel(1) }
+```rust
+{{#include ../../../code/flow-rs/tests/prelude.rs:prelude_compile_checks}}
 ```
 
-这招值得记:**「一个名字在不在作用域」本身就是可测的**——写一个引用了它的函数签名，让编译器替你断言。它不占运行期一分一毫，却把「prelude 是否完备」这个否则只能靠肉眼数的问题，变成了 `cargo test` 能红能绿的硬约束。加进这个测试后，全工程 **92 个测试**通过（Ch4.4 的 91 + 本章这 1 个集成测试），clippy `-D warnings`、`cargo fmt --all --check`、`mdbook build` 全绿。
+这招值得记:**「一个名字在不在作用域」本身就是可测的**——写一个引用了它的函数签名，让编译器替你断言。它不占运行期一分一毫，却把「prelude 是否完备」这个否则只能靠肉眼数的问题，变成了 `cargo test` 能红能绿的硬约束。本章新增的就是这 **1 个集成测试**（`tests/prelude.rs`），连同 clippy `-D warnings`、`cargo fmt --all --check`、`mdbook build` 全绿。（`cargo test -p flow-rs` 的**总数**会随 Part 5 之后仍在生长的模块继续增加——终点成品是 139 个；本章只关心新添的这 1 个门面完备性测试，不去追总数。）
 
 ## 7. 诚实的边界:这一章**没做**什么
 
 - **没有把 `rt` / `broker` / `optimizer` 补进门面**——因为我们压根没实现它们（分别对应 FFI 运行时、动态子图、图优化器，见 §4/§5）。门面只暴露真实存在的东西。
-- **没有做 `pub use` 之外的任何再封装**——prelude 是纯粹的名字聚合，不引入新类型、不加抽象层。它薄到「删掉它，下游把 `use` 铺回去就行」，这正是它该有的样子。
+- **没有做 `pub use` 之外的重封装**——prelude 基本是纯粹的名字聚合，不加抽象层（唯一的例外是一个 `pub type Arg = toml::value::Value;` 别名，它也只是给已有类型换个名字，不引入新类型）。它薄到「删掉它，下游把 `use` 铺回去就行」，这正是它该有的样子。
 - **没有为「兼容原版下游代码」做逐字节的 API 镜像**——我们对齐的是**入口习惯与心智模型**（`use flow_rs::prelude::*;` 起手、同样的宏写法），不是让原版算法仓的 `.rs` 文件原封不动编译过（那需要把 pplcore/mpp 整座山搬过来）。
 
 ## 小结
 
-- **prelude 门面 = 把高频名字收拢到一处，下游一行 `use flow_rs::prelude::*;` 起手**，替掉每个节点文件顶上一屏的 `use`。门面模块**不定义东西**，纯 `pub use` 聚合。
+- **prelude 门面 = 把高频名字收拢到一处，下游一行 `use flow_rs::prelude::*;` 起手**，替掉每个节点文件顶上一屏的 `use`。门面模块**几乎不定义东西**（仅一个 `Arg` 类型别名），纯 `pub use` 聚合。
 - **同名 trait + 派生宏能并存**，因为宏和类型分属两个命名空间，编译器按用法各查各的——`#[derive(Node)]` 查宏、`dyn Node` 查 trait。这是 serde 的同款套路。
 - **对齐原版**:骨架逐行对得上（channel/graph/node/registry/resource/Builder/宏、连 `Args` 定义都一样），下游起手式一致。
-- **原版 prelude「大出来的部分」正是闭源边界**:`broker`（动态子图）、`rt`（FFI 运行时）、`optimizer`（图优化器）、`interlayer`（运行期端口类型）——全是我们从 Ch0.2 就划出去的非目标。门面的大小就是范围的尺子。
+- **原版 prelude「大出来的部分」量的是边界与接口面**:`broker`（动态子图）、`rt`（FFI 运行时）、`optimizer`（图优化器）是我们从 Ch0.2 就划出去的**真·非目标**；而 `interlayer`（端口类型描述）与 `Arg` 我们**补了导出**——但那只是**接口就位**，其背后的动态端口/Demux 尚未接通（详见章末「接口存在 ≠ 接线完成」）。门面对齐了原版的接口，**能力**才是范围的尺子。
 - **我们的 `Result` 直接进门面**（thiserror 自有错误类型），下游比原版少一句 `use anyhow::Result;`——「拥有自己的错误类型」的人机工程红利。
 - **闭源边界**:我们造的是**承载**推理/跟踪/告警节点的引擎；那些节点住在 `pplcore` 里、跑在 `mpp` 上，是另一座山。
 - **完备性可测**:`tests/prelude.rs` 通篇只一行 `use`，却跑通「定义资源 + 定义节点 + 搭图跑图」；再加一组「能编译即在作用域」的编译期检查，把「门面是否完备」变成 `cargo test` 的硬约束。

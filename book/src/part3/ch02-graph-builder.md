@@ -216,38 +216,43 @@ impl MainGraph {
 
 这一章的测试在 `tests/graph_builder.rs`，是一个**外部 crate**视角的集成测试——因为 `node_register!` 走的是「下游 crate 用 `flow_rs::` 绝对路径注册」的路子，必须在 flow-rs 之外才能真实演练（这点 Ch2.4 已经踩通）。
 
-测试先定义一个 `TestBinaryOp` 节点：`#[inputs(a, b)]` 两输入、`#[outputs(c)]` 一输出、一个 `op: String` 参数——相对 Ch2.4 的 `Doubler`（1 入 1 出、无参），它把本章三件新事一次性覆盖：**多输入端口**（命名接线必须对号入座）、**输出端口**、**从 `args` 取参数**。
+测试先定义一个 `TestBinaryOp` 节点：`#[inputs(a, b)]` 两输入、`#[outputs(c)]` 一输出、一个 `op: String` 参数——相对 Ch2.4 的 `Doubler`（1 入 1 出、无参），它把本章三件新事一次性覆盖：**多输入端口**（命名接线必须对号入座）、**输出端口**、**从 `args` 取参数**（真实源码取自 `tests/graph_builder.rs`）：
 
-**主线 `builds_and_runs_binary_op`**（端到端）：
-
-```rust,ignore
-let mut g = Builder::default().template(ADD_GRAPH).build().unwrap();
-
-let mut ins = g.input_names(); ins.sort();
-assert_eq!(ins, vec!["a", "b"]);          // 对外端口就是 TOML 里的 a/b/c
-assert_eq!(g.output_names(), vec!["c"]);
-
-let actors = g.take_actors();
-assert_eq!(actors.len(), 1);
-let handles: Vec<_> = actors.into_iter().map(|a| a.start()).collect();
-
-let a_in = g.input("a").unwrap();
-let b_in = g.input("b").unwrap();
-let mut c_out = g.take_output("c").unwrap();
-a_in.send(Envelope::new(1i32)).await.unwrap();
-b_in.send(Envelope::new(2i32)).await.unwrap();
-let mut e = c_out.recv::<i32>().await.unwrap();
-assert_eq!(e.unpack(), 3);                // 1 + 2 == 3 —— 桥若接反，这里立刻变红
-
-drop(a_in); drop(b_in); drop(g);          // 优雅停机：drop 掉所有输入 Sender
-for h in handles { h.await.unwrap().unwrap(); }
+```rust
+{{#include ../../../code/flow-rs/tests/graph_builder.rs:node_def}}
 ```
 
-`1 + 2 == 3` 是**桥的验收**：喂给对外输入 `a` 的 `1` 必须准确落到节点的 `a` 端口、`b` 的 `2` 落到 `b` 端口，`op="+"` 必须真的被注入成了 `"+"`。三者任一接错，结果就不是 `3`。停机那几行也复用了 Part 1 的关闭语义：`drop` 掉手上两个 `Sender` 外加 `drop(g)`（连图内 `inputs` 表里那两份 `Sender` 一起丢），节点 `recv` 到 `ChannelClosed` 后由 `#[methods]` 的包装吞成「置标志 + 退出」，任务干净返回 `Ok`。
+**主线 `builds_and_runs_binary_op`**（端到端，真实源码）：
 
-**错误与兼容性支线**检查入口、类型、端口引用、参数与空边界；未接线标量端口应建图成功。另用倒序输入与减法验证按名接线，用左信封的 `partial_id` 验证元信息来自正确输入。加法即使接反也得到相同结果，不能单独证明位置映射正确。
+```rust
+{{#include ../../../code/flow-rs/tests/graph_builder.rs:e2e}}
+```
 
-至此 flow-rs 全套 **46 项测试**（含 flow-derive 的宏单测）全绿，clippy `-D warnings` 干净。
+`1 + 2 == 3` 是**桥的验收**：喂给对外输入 `a` 的 `1` 必须准确落到节点的 `a` 端口、`b` 的 `2` 落到 `b` 端口，`op="+"` 必须真的被注入成了 `"+"`。三者任一接错，结果就不是 `3`。停机那几行复用 Part 1 的关闭语义：`drop` 掉手上两个 `Sender` 外加 `drop(g)`（连图内 `inputs` 表里那两份 `Sender` 一起丢），节点 `recv` 到 `ChannelClosed` 后由 `#[methods]` 的包装吞成「置标志 + 退出」，任务干净返回 `Ok`。
+
+> **一处与叙事进度的落差**：上面 include 的真实测试里，`a.start(Context::anonymous())` 带了个 `Context` 参数——那是 Ch4.3「资源与上下文」才引入的东西，本章的心智模型里 `start()` 还没有它。之所以真实源码已经带上，是因为 `code/` 是**全书终点的成品**，`Actor::start` 的签名在 Ch4.3 统一升级过一次。本章只需把 `Context::anonymous()` 读作「一个空上下文占位」，它不影响这里要验的「名字↔位置的桥」；等读到 Ch4.3，这个参数的来龙去脉会讲透。
+
+**错误与兼容性支线**检查入口、类型、端口引用四类构建期错误（真实源码）：
+
+```rust
+{{#include ../../../code/flow-rs/tests/graph_builder.rs:err_checks}}
+```
+
+**最硬的一条证据**是 `configuration_order_does_not_swap_operands_or_metadata`：它故意让 TOML 的 `inputs` 按 `b`、`a` 倒序书写，而注册表字段顺序是 `a`、`b`，再用**减法**（`10 - 3 == 7`，不对称，接反就会算成 `3 - 10 == -7`）+ 左输入的 `partial_id=42` 双重钉死「按名接线」——加法即使接反也得 `13`，单独证明不了位置映射，减法才行：
+
+```rust
+{{#include ../../../code/flow-rs/tests/graph_builder.rs:wiring_by_name}}
+```
+
+另有未接线端点、空边界、缺参数等支线（`unconnected_*` / `declared_boundary_connections_must_not_be_empty` / `missing_arg_errors`）验证兼容性边界，均在 `tests/graph_builder.rs` 里。clippy `-D warnings` 干净。
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test graph_builder --locked
+```
+
+正文里 `TestBinaryOp` 节点定义、主线 e2e、错误支线与按名接线证据均由 `{{#include}}` 直接取自 `tests/graph_builder.rs`。§2~§7 讲解装配算法的代码块仍标注为「示意」——它们展示的是**单端口阶段**的中间签名（`Vec<Receiver>`、`start()` 无 `Context`），与终点源码的差异见本章开头的说明与 [Ch3.2a 接线实作](ch02a-wiring-workshop.md)。
 
 ## 小结
 

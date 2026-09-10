@@ -1,6 +1,6 @@
 # 前言
 
-这本书带你**从零用 Rust 重写 MegFlow 引擎核心**。读完你将：
+这本书的目标是带你**从零用 Rust 重写 MegFlow 的 Rust 框架与服务插件**。范围包括 `flow-rs`、`flow-derive`、`flow-message`、`flow-plugins`，固定参照父目录 MegFlow 的提交 `95f870bfefd48fa31f9cf88320de4cc177985c72`。读完并完成所有验收后，你应当能够：
 
 1. 吃透 MegFlow（算法仓赖以运行的 dataflow 框架）的每个模块；
 2. 顺带补齐 Rust 的异步、trait 对象、过程宏、生命周期；
@@ -24,7 +24,7 @@
 
 ## 里程碑
 
-- **Ch3.4**：端到端跑通 BinaryOp `1 + 2 == 3`（第一个完整框架）。
+- **Ch3.4**：端到端跑通 BinaryOp `1 + 2 == 3`，验证消息、节点、注册、配置和调度组成的第一条执行链。这只是基础里程碑。
 - **Ch5.1**：跑通一个 detector → tracker → alarm 风格的多节点/子图图。
 
 ## 目标与当前完成度
@@ -36,4 +36,6 @@
 请先读 [完整重构的验收账本](part0/ch04-completeness-audit.md)，了解每项差距、
 原版源码证据和验收要求。Python 调用层可以不保留，Rust 业务能力不能随之删去。
 
-宏学习从 [Ch2.0](macros/01-basics.md) 开始，随后逐步学习过程宏和相关 crate。
+宏学习从[宏专题路线图](macros/00-roadmap.md)开始，随后逐步学习声明宏、过程宏和相关 crate。
+
+本书允许重新设计公开 Rust API，但必须对照原版验证配置语义、消息结果、元信息、错误、状态变化、关闭和资源释放。Python/C 绑定、JavaScript 调试前端和 quickstart 不在范围内；Rust 调试协议在范围内。无法取得的私有依赖用本地纯 Rust 等价实现，其内部算法只能声明调用点行为兼容，不能声称源码相同。

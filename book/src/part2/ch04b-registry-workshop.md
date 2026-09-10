@@ -55,7 +55,26 @@ iter 遍历引用，find 返回 `Option<&Registration>`，找不到是 None。ok
 对象的具体类型不同，但都能通过 Operation 接口调用。fold 从 1 开始，依次应用操作，
 最终得到 36。这是同步串行实验，还没有通道与任务调度。
 
-完整源码在 `code/flow-rs/examples/registry_from_functions.rs`。仓库内运行：
+本课只新增一个 `main.rs`，没有 Cargo 依赖。前面分段内容合起来的完整文件如下：
+
+```rust
+{{#include ../../../code/flow-rs/examples/registry_from_functions.rs}}
+```
+
+在空目录把它保存为 `main.rs`，执行：
+
+```bash
+rustc --edition=2021 main.rs -o registry-study
+./registry-study
+```
+
+精确预期输出为：
+
+```text
+注册原理通过：按名查构造器、独立实例、不同类型统一调用、未知名称报错
+```
+
+仓库内也可运行：
 
 ```bash
 cargo run --manifest-path code/Cargo.toml -p flow-rs --example registry_from_functions --locked

@@ -61,6 +61,8 @@ let outcome = handle.await;      // Result< Result<()>, JoinError >
 
 ## 4. `start`：spawn 全部 + join 全部
 
+先看本章要写进 `MainGraph` 的**最小版**（下面这段是**简化示意**，聚焦「spawn 全部 + join 全部」这一个主题；`actor.start()` 到 Ch4.3 才会多收一个 `Context` 参数，届时这里会顺势长出一行，终点完整代码见本章 §8）：
+
 ```rust,ignore
 pub fn start(&mut self) -> JoinHandle<Result<()>> {
     let handles: Vec<_> = self
@@ -146,41 +148,45 @@ outputs = [
 ]
 ```
 
-**主线 `start_runs_all_nodes_then_stop_shuts_down`**——一次 `start()` 跑起两个节点，喂数、收数、优雅停机：
+**主线 `start_runs_all_nodes_then_stop_shuts_down`**——一次 `start()` 跑起两个节点，喂数、收数、优雅停机。下面是 `tests/scheduler.rs` 里**逐字照抄可跑**的这一段（本书用 `{{#include}}` 直接嵌入真实测试文件，不是重新誊写的片段）：
 
-```rust,ignore
-let mut g = Builder::default().template(TWO_NODE_GRAPH).build().unwrap();
-let handle = g.start();                       // 一次启动全图，拿聚合句柄
-
-let a = g.input("a").unwrap();  let b = g.input("b").unwrap();
-let x = g.input("x").unwrap();  let y = g.input("y").unwrap();
-let mut sum = g.take_output("sum").unwrap();
-let mut prod = g.take_output("prod").unwrap();
-
-a.send(Envelope::new(1i32)).await.unwrap();  b.send(Envelope::new(2i32)).await.unwrap();
-x.send(Envelope::new(3i32)).await.unwrap();  y.send(Envelope::new(4i32)).await.unwrap();
-assert_eq!(sum.recv::<i32>().await.unwrap().unpack(), 3);   // 1 + 2
-assert_eq!(prod.recv::<i32>().await.unwrap().unpack(), 12); // 3 * 4
-
-drop(a); drop(b); drop(x); drop(y);           // 丢掉克隆 Sender
-g.stop();                                     // 丢掉图自留的 Sender
-handle.await.unwrap().unwrap();               // 两节点都收尾 → 聚合句柄 Ok
+```rust
+{{#include ../../../code/flow-rs/tests/scheduler.rs:main_test}}
 ```
 
 `handle.await.unwrap().unwrap()` 能顺利返回，恰恰证明了聚合句柄**等齐了两个**任务：只要有一个没停，这句就悬着。
 
 **错误支线 `node_error_propagates_through_aggregate_handle`**——给 `op="%"`（未知运算符），节点收到数据后 `exec` 返回 `Err(Arg)`：
 
-```rust,ignore
-let handle = g.start();
-// …… 喂 a=1, b=2 ……
-let result = handle.await.unwrap();                    // 外层 unwrap：任务没崩
-assert!(matches!(result, Err(Error::Arg { .. })));     // 内层：拿到节点自己的 Err
+```rust
+{{#include ../../../code/flow-rs/tests/scheduler.rs:error_test}}
 ```
 
 这条支线钉死的正是 §4 的**内层 `?`**：节点的业务错误（`Arg`，不是 `TaskJoin`）经聚合句柄一路抬到 `handle.await`，`unwrap()` 拆掉外层的「没崩」，剩下的正是节点返回的那个 `Err(Arg)`。
 
 至此 flow-rs 全套 **48 项测试**（较上一章 +2）全绿，clippy `-D warnings` 干净。
+
+## 8. 本章终点与复现
+
+**起点**：Ch3.2 结束时的工程——`MainGraph` 已能 `build()`、`take_actors()`，测试还在手动逐个 `start`。
+
+**本章改动**：给 `code/flow-rs/src/graph.rs` 的 `MainGraph` 加 `start` / `stop` 两个方法、给 `code/flow-rs/src/error.rs` 加 `TaskJoin` 变体，新增 `code/flow-rs/tests/scheduler.rs`。§4 的 `start` 是聚焦本章主题的简化示意；真实文件里 `start` 已按 Ch4.3 收一个 `Context`（`initialize` 时按名借资源），逻辑骨架与本章完全一致。
+
+**验收命令**（照抄可跑，两项测试全绿即达标）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test scheduler --locked
+```
+
+预期输出包含：
+
+```text
+running 2 tests
+test start_runs_all_nodes_then_stop_shuts_down ... ok
+test node_error_propagates_through_aggregate_handle ... ok
+```
+
+本章正文里两段测试代码由 `{{#include}}` 直接取自该文件，读者照抄或直接运行都是同一份真实代码。
 
 ## 小结
 

@@ -124,64 +124,27 @@ cargo test --manifest-path code/Cargo.toml -p flow-message --test envelope_contr
 
 ### 3.2 `Envelope<M>`——载荷为什么是 `Option<M>`
 
-```rust,ignore
-pub struct Envelope<M> {
-    info: EnvelopeInfo,
-    msg: Option<M>,
-}
-```
-
 载荷用 `Option<M>` 而非裸 `M`，有两个刚需：① `unpack` 要能把载荷**拿走**（`Option::take` 留下 `None`），这对应「消息被下游取走消费」的语义；② 允许存在**空信封**（`empty()`、或载荷已被取走）。
 
-方法实现直接照契约写。注意 `new`/`unpack`/`repack`/`info` 这些**不涉及类型擦除**的方法放在**无约束**的 `impl<M>` 块里——载荷装取、换包本身不需要 `M: 'static/Send`：
+方法实现直接照契约写。注意 `new`/`unpack`/`repack`/`info` 这些**不涉及类型擦除**的方法放在**无约束**的 `impl<M>` 块里——载荷装取、换包本身不需要 `M: 'static/Send`（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-```rust,ignore
-impl<M> Envelope<M> {
-    pub fn new(msg: M) -> Self {
-        Self { info: EnvelopeInfo::default(), msg: Some(msg) }
-    }
-    pub fn empty() -> Self {
-        Self { info: EnvelopeInfo::default(), msg: None }
-    }
-    pub fn info(&self) -> &EnvelopeInfo { &self.info }
-    pub fn info_mut(&mut self) -> &mut EnvelopeInfo { &mut self.info }
-
-    /// 取出载荷（留下空信封）。空信封会 panic。
-    pub fn unpack(&mut self) -> M {
-        self.msg.take().expect("envelope has no message")
-    }
-
-    /// 复用同一份元信息，换一个新载荷 T，产出「新类型」的信封。
-    pub fn repack<T>(&self, msg: T) -> Envelope<T> {
-        Envelope { info: self.info.clone(), msg: Some(msg) }
-    }
-
-    /// 原地替换载荷（类型不变）。
-    pub fn repack_inplace(&mut self, msg: M) {
-        self.msg = Some(msg);
-    }
-
-    pub fn is_some(&self) -> bool { self.msg.is_some() }
-    pub fn is_none(&self) -> bool { self.msg.is_none() }
-    // …… with_info / take / get_ref / get_mut 同理，见真实代码
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:envelope_struct}}
 ```
 
 `repack<T>` 是引擎里节点做「输入信封 → 输出信封」映射的关键：**载荷类型从 `M` 变成 `T`，但元信息（序号等）克隆保留、随消息一路流下去**。这就是为什么它带一个新的类型参数 `T` 而不是固定 `M`。
 
 ### 3.3 `Clone` 约束：为什么单独一个 `impl` 块
 
-原版 `Envelope<M>` 的方法块整体要求 `M: 'static + Send + Clone`。我们**把 `Clone` 拆出来、单独条件实现**——只有当载荷本身可克隆时，信封才可克隆：
+原版 `Envelope<M>` 的方法块整体要求 `M: 'static + Send + Clone`。我们**把 `Clone` 拆出来、单独条件实现**——只有当载荷本身可克隆时，信封才可克隆（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-```rust,ignore
-impl<M: Clone> Clone for Envelope<M> {
-    fn clone(&self) -> Self {
-        Envelope { info: self.info.clone(), msg: self.msg.clone() }
-    }
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:envelope_clone}}
 ```
 
-为什么要拆？因为「信封可克隆」这个能力**只有广播（Ch4.1 的 `bcast`：一份消息发给多个下游）才需要**。把 `M: Clone` 从「所有信封的基本门槛」降级成「按需才要」，意味着**载荷不可克隆的消息类型也能正常流经引擎**（只要不走广播）。这是一处「约束更精确 → 适用面更宽」的重写改进：不为一个小众特性向所有消息强加 `Clone`。
+为什么单独拆一个块？因为「信封可克隆」应当**跟着载荷的能力走**：载荷 `M: Clone`，信封才 `Clone`；载荷不能克隆，信封也不能——这比原版把 `Clone` 硬绑进主方法块更精确。
+
+不过要**诚实地记一笔落差**：把信封**送进引擎**（`seal` 成 `SealedEnvelope` 跨节点搬运）这条路，最终仍然要求 `M: Clone`。原因是下一步的类型擦除接口 `AnyEnvelope` 带了一个 `clone_box` 方法（§4.1 细说），而 Ch4.2 的广播 `Bcast`「一份消息发给多个下游」正是靠它在**擦除之后**还能复制信封。所以真实源码里 `impl<M: 'static + Send + Clone> AnyEnvelope for Envelope<M>`——`Clone` 是硬门槛。这里的 `impl<M: Clone> Clone` 只是把「信封克隆」这件事本身写成条件实现，它服务于 `clone_box`，而不是说「不可克隆的载荷也能流经引擎」。若你此刻还没读到 Ch4.2，把 `Clone` 读作「凡是要进引擎搬运的消息都得可克隆」即可，来龙去脉在广播那章讲透。
 
 ## 4. 绿（续）：类型擦除三件套
 
@@ -189,61 +152,38 @@ impl<M: Clone> Clone for Envelope<M> {
 
 ### 4.1 `AnyEnvelope`：对象安全的擦除接口
 
-trait 里**每个方法都不带泛型参数**（守住 Ch1.2 §4 的对象安全红线），关键是 `as_any` 把自己「降级」成 `&dyn Any`：
+trait 里**每个方法都不带泛型参数**（守住 Ch1.2 §4 的对象安全红线），关键是 `as_any` 把自己「降级」成 `&dyn Any`。除此之外还有一个**关键方法** `clone_box`——它是「类型擦除之后还能克隆信封」的唯一出路（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-```rust,ignore
-pub trait AnyEnvelope: Any {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn is_some(&self) -> bool;
-    fn is_none(&self) -> bool;
-    fn info(&self) -> &EnvelopeInfo;
-    fn info_mut(&mut self) -> &mut EnvelopeInfo;
-}
-
-impl<M: 'static> AnyEnvelope for Envelope<M> {
-    fn as_any(&self) -> &dyn Any { self }          // Envelope<M> → &dyn Any
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn is_some(&self) -> bool { self.msg.is_some() }
-    fn is_none(&self) -> bool { self.msg.is_none() }
-    fn info(&self) -> &EnvelopeInfo { &self.info }
-    fn info_mut(&mut self) -> &mut EnvelopeInfo { &mut self.info }
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:any_envelope_trait}}
 ```
 
-`AnyEnvelope: Any` 这个**超 trait**约束要求实现者 `'static`（`Any` 的前提），所以 `impl` 块写 `M: 'static`。注意这里**不要求 `M: Clone`**——擦除、认领、读写元信息都跟能否克隆无关，又一次把约束收窄到刚好够用。
+实现块把泛型 `M` 的约束定死为 `M: 'static + Send + Clone`：
+
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:any_envelope_impl}}
+```
+
+三个约束逐一对应：`'static` 来自超 trait `AnyEnvelope: Any`（`Any` 的前提）；`Send` 因为擦除后的盒子恒为 `+ Send`（要跨任务搬运）；**`Clone` 则是 `clone_box` 逼出来的**——擦掉 `M` 后标准库的 `Clone` 已无从谈起（trait 对象不是 `Sized`、也不知道具体类型怎么复制），只能把克隆能力**烙进 trait**：每个具体实现者自己 `self.clone()` 一份、再重新封箱。这正是 `dyn-clone` crate 在背后生成的东西，我们手写它。
+
+> **与 §3.3 呼应的诚实记账**：正因为 `clone_box` 要求实现者 `M: Clone`，「进引擎搬运」的信封才统统需要可克隆。这不是把 `Clone` 强加给一个小众特性——Ch4.2 的广播 `Bcast` 把一份**已封箱**的 `SealedEnvelope` 扇给多个下游，靠的就是 `clone_box`（见 §4.2 的 `impl Clone for SealedEnvelope`）。所以最精确的说法是：**基本信封操作（`impl<M>` 块）不要求 `Clone`，但一旦要 `seal` 进引擎，`Clone` 就是硬门槛**。
 
 ### 4.2 `SealedEnvelope` 与 `seal`
 
-```rust,ignore
-pub type SealedEnvelope = Box<dyn AnyEnvelope + Send>;
+`SealedEnvelope` 是装箱擦除后的盒子；`seal` 把 `Envelope<M>` 装进去。多出的 `impl Clone for SealedEnvelope` 是让**封箱后的**盒子也能克隆——标准库对 `Box<dyn Trait>` 不白给 `Clone`，只能手写一条转调 `clone_box`（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-impl<M: 'static + Send> Envelope<M> {
-    pub fn seal(self) -> SealedEnvelope {
-        Box::new(self)   // Envelope<M> 被 unsize 强制转换成 dyn AnyEnvelope + Send
-    }
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:sealed_envelope}}
 ```
 
-`seal` 这里才要求 `M: Send`——因为 `Box::new(self)` 要能强制转换（unsize coercion）成 `Box<dyn AnyEnvelope + Send>`，前提是 `Envelope<M>: Send`，而这需要 `M: Send`（Ch1.1 §3：擦除后的盒子要跨线程搬运，`+ Send` 是硬通行证）。把 `Send` 只加在 `seal` 这个真正需要它的方法上，而不是全类型——**约束跟着需求走**，这条原则本章反复出现。
+`seal` 要求 `M: 'static + Send + Clone`——`Send` 因为 `Box::new(self)` 要能 unsize 强制转换成 `Box<dyn AnyEnvelope + Send>`（前提 `Envelope<M>: Send`，即 `M: Send`，Ch1.1 §3 的跨线程通行证）；`Clone` 则是承接 §4.1 `AnyEnvelope` 实现块的门槛（`clone_box` 要它）。而 `impl Clone for SealedEnvelope { self.clone_box() }` 这一条，正是 Ch4.2 广播 `Bcast` 能对已封箱消息「复制一份发给下一个下游」的底层支撑——它把 §4.1 烙进 trait 的克隆能力，兑现成了对 `SealedEnvelope` 直接 `.clone()`。
 
 ### 4.3 安全 downcast：抹掉原版那段 `unsafe`
 
-这是本章相对原版最实在的一处改进。回顾 Ch1.2 §5：原版在 `impl dyn AnyEnvelope` 上**手写** `downcast_ref`，内部用 `unsafe` 把裸指针 `transmute` 成 `&T`。我们不必自己 transmute——既然 `as_any()` 能给出 `&dyn Any`，就把「变回具体类型」全权交给**标准库那套久经考验的安全实现**：
+这是本章相对原版最实在的一处改进。回顾 Ch1.2 §5：原版在 `impl dyn AnyEnvelope` 上**手写** `downcast_ref`，内部用 `unsafe` 把裸指针 `transmute` 成 `&T`。我们不必自己 transmute——既然 `as_any()` 能给出 `&dyn Any`，就把「变回具体类型」全权交给**标准库那套久经考验的安全实现**（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-```rust,ignore
-// 定义在 `dyn AnyEnvelope + Send` 上（即 SealedEnvelope 的内层类型）
-impl dyn AnyEnvelope + Send {
-    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
-        self.as_any().downcast_ref::<T>()      // ← std 的安全 downcast，无 unsafe
-    }
-    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.as_any_mut().downcast_mut::<T>()
-    }
-    pub fn is<T: Any>(&self) -> bool {
-        self.as_any().is::<T>()
-    }
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:safe_downcast}}
 ```
 
 整段代码**零 `unsafe`**。`downcast` 带泛型参数 `T`，所以它只能是 `impl` 块上的**关联函数**、进不了 vtable（Ch1.2 §4 的对象安全约束依然生效）——这一点和原版一致；不同的是内部实现从「手写 unsafe transmute」换成了「std 安全路径」。测试 `type_erasure_seal_then_downcast` 里「猜错类型得 `None` 而不崩」正是这份安全性的体现。
@@ -252,31 +192,13 @@ impl dyn AnyEnvelope + Send {
 
 ### 4.4 `DummyEnvelope`：一个不带载荷的占位信封
 
-某些控制路径（比如后面的停机信号）需要「一个空信封」而根本不携带任何 `M`。原版用 `DummyEnvelope` 承担。它同时是 `AnyEnvelope` 的**第二个实现者**，正好证明这个 trait 不是 `Envelope<M>` 专属：
+某些控制路径（比如后面的停机信号）需要「一个空信封」而根本不携带任何 `M`。原版用 `DummyEnvelope` 承担。它同时是 `AnyEnvelope` 的**第二个实现者**，正好证明这个 trait 不是 `Envelope<M>` 专属（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
-```rust,ignore
-#[derive(Default, Clone)]
-pub struct DummyEnvelope;
-
-impl DummyEnvelope {
-    pub fn seal(self) -> SealedEnvelope { Box::new(self) }
-}
-
-impl AnyEnvelope for DummyEnvelope {
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    fn is_some(&self) -> bool { false }
-    fn is_none(&self) -> bool { true }
-    fn info(&self) -> &EnvelopeInfo {
-        unimplemented!("DummyEnvelope has no EnvelopeInfo")  // 与原版一致：占位信封不携带元信息
-    }
-    fn info_mut(&mut self) -> &mut EnvelopeInfo {
-        unimplemented!("DummyEnvelope has no EnvelopeInfo")
-    }
-}
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs:dummy_envelope}}
 ```
 
-`info()` 用 `unimplemented!()`——这是**刻意保留**原版行为：占位信封不带元信息，引擎的控制路径也从不对它调 `info()`。真到有人调用，`unimplemented!` 会立刻 panic 指出「这里逻辑错了」，比返回一份假数据更早暴露 bug。
+`clone_box` 对它同样必须实现（trait 的一部分）——克隆一个 `DummyEnvelope` 再封箱即可。`info()` 用 `unimplemented!()`——这是**刻意保留**原版行为：占位信封不带元信息，引擎的控制路径也从不对它调 `info()`。真到有人调用，`unimplemented!` 会立刻 panic 指出「这里逻辑错了」，比返回一份假数据更早暴露 bug。
 
 ## 5. 再跑测试：绿
 
@@ -285,18 +207,20 @@ cargo test -p flow-message
 ```
 
 ```text
-running 6 tests
+running 8 tests
 test envelope::tests::dummy_is_empty ... ok
 test envelope::tests::extra_data_shared_via_arc ... ok
 test envelope::tests::new_then_unpack ... ok
 test envelope::tests::repack_carries_info_and_changes_type ... ok
 test envelope::tests::repack_inplace_keeps_type ... ok
 test envelope::tests::type_erasure_seal_then_downcast ... ok
+test envelope::tests::sealed_envelope_is_cloneable ... ok
+test envelope::tests::cloned_sealed_envelope_carries_info ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-**绿**。红-绿走完一轮，消息层的地基就位了。完整代码在本仓库 `code/flow-message/src/envelope.rs`。本章手写片段用于分阶段解释，最终实现以该文件与契约测试为准。
+**绿**。红-绿走完一轮，消息层的地基就位了。多出的 `sealed_envelope_is_cloneable` / `cloned_sealed_envelope_carries_info` 两条正是钉死 §4 那套 `clone_box`——**封箱后仍能克隆、且元信息随克隆一起复制**（Ch4.2 广播的前提）。完整代码在本仓库 `code/flow-message/src/envelope.rs`。本章手写片段用于分阶段解释，最终实现以该文件与契约测试为准。
 
 > **依赖账**：当前信封实现使用标准库，通过对象安全的 clone_box 方法克隆类型擦除信封；原版使用 dyn_clone::DynClone。当前工程没有引入 dyn-clone，后续广播复用 clone_box。
 
@@ -306,7 +230,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 |---|---|---|---|
 | `downcast` 实现 | `impl dyn AnyEnvelope` 手写，含 `unsafe` transmute | `as_any() -> &dyn Any` + std 安全 downcast，**零 unsafe** | 更少 unsafe = 更少潜在 UB，把正确性交给标准库 |
 | `EnvelopeInfo` 字段 | 7 个 | 同样保留 7 个 | 转发与重打包不丢失协议元信息 |
-| `M: Clone` 约束 | 主方法块有 Clone 约束 | 基本信封操作不要求 Clone，seal 仍要求 Clone | 可构造不可克隆载荷的信封，但当前不能将它封装后送入引擎 |
+| `M: Clone` 约束 | 主方法块有 Clone 约束 | 基本信封操作（`impl<M>`）不要求 Clone；`AnyEnvelope`/`seal` 仍要求 Clone（`clone_box` 逼出，Ch4.2 广播用） | 可构造不可克隆载荷的信封做纯本地运算，但送进引擎搬运（seal）仍需 Clone |
 | `Send` 约束 | 混在方法块 | 只加在真正要跨线程的 `seal` 上 | 约束跟着需求走 |
 | `dyn_clone` 依赖 | 继承 `DynClone` | 自行提供对象安全的 clone_box | 用标准库实现类型擦除后的克隆 |
 | 文件组织 | 拆 3 个文件 | 合成 1 个 `envelope.rs` | 一起变的东西放一起 |

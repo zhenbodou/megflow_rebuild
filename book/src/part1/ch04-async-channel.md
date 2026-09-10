@@ -2,7 +2,7 @@
 
 上一章我们造好了「消息盒子」`Envelope<M>` 和它的类型擦除。可盒子只是静物——它得**流动**起来：从一个节点异步地发出、被另一个节点异步地收到。这一章给引擎装上**异步的心跳**：先补 `async`/`await`/`Future`/`tokio` 这几样引擎绕不开的异步地基，再把 tokio 的 channel **封装**成引擎自己的收发端，让上一章的 `SealedEnvelope` 真正在任务之间「跑」起来。
 
-这也是 **Part 1 的收官章**。写完，我们就有了「消息层 + 异步通道」这套**地基**，Part 2 才能在上面盖「节点」。
+本章实现第一版单消费者有界通道。后面的 Ch1.4b～Ch1.4e 继续扩展容量、竞争接收、类型转换和取消协议；完成本章不等于完成原版通道。
 
 <!-- toc -->
 
@@ -12,7 +12,7 @@ dataflow 引擎里，一个节点大部分时间在**等**——等上游发来�
 
 Rust 的异步三件套：
 
-- **`Future`**：一个「**将来**才会算出值」的惰性状态机。它有个核心方法 `poll`：运行时问它「好了吗？」——要么答 `Ready(值)`，要么答 `Pending(还没，回头再问)`。关键：**`Future` 是惰性的**，不 `poll` 它就什么都不做。
+- **`Future`**：一个「**将来**才会算出值」的惰性状态机。它有个核心方法 `poll`：运行时问它「好了吗？」——要么答 `Ready(值)`，要么答 `Pending(还没，回头再问)`。返回 `Pending` 前，Future 通常需要安排在条件变化时通过 Waker 通知执行器再次 poll。`async fn` 的函数体在被 poll 前不执行；但某些 Future 是已经启动的外部操作的句柄，不能由此推断所有相关工作都尚未开始。
 - **`async fn` / `async {}`**：写异步代码的语法糖。`async fn foo() -> T` 实际返回的是一个 `Future<Output = T>`；函数体被编译器**改写成一个状态机**。
 - **`.await`**：在一个 `Future` 上「等它出结果」。语义是「**让出**：如果没就绪，就把控制权交还运行时去跑别的任务，等就绪了再从这里继续」——注意是让出**任务**，不是阻塞**线程**。
 
@@ -68,191 +68,150 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 thiserror = "2"
 ```
 
-`sync` 给我们 `mpsc`，`rt` + `macros` 给我们 `#[tokio::test]`/`#[tokio::main]`。**只开用得到的 feature**，不把整个 tokio 拉进来。
+`sync` 给我们 `mpsc`，`rt` 支持单线程运行时，`macros` 提供测试与入口属性宏。`#[tokio::test]` 默认使用当前线程；使用 `#[tokio::main]` 时本组 feature 必须显式指定 `flavor = "current_thread"`，默认多线程入口另需 `rt-multi-thread`。**只开用得到的 feature**，不把整个 tokio 拉进来。
 
 先完成 [异步三步实验](ch04a-async-workshop.md)，能解释 Future、背压与关闭，再实现下节的封装。
 
-## 4. 红：先写通道的收发测试
+## 4. 本章工程：先固定能抄写的终点
 
-老规矩，先红。我们要封装的通道，契约照着 Ch0.3 读到的原版形状：一条**承载 `SealedEnvelope`** 的通道，有**未类型化**的 `send_any`/`recv_any`，和**类型化**的 `send::<T>`/`recv::<T>`（内部 seal / downcast）。测试写进 `code/flow-rs/src/channel.rs`：
+本章只依赖 Ch1.3 的消息库，不依赖节点、注册表、建图或后续通道实现。先在独立目录验证基础版，再在接下来的通道课中演进它。不要把最终仓库的多消费者测试放进这一版：这里的接收端必须是 `mut`，且不实现 Clone。
 
-```rust,ignore
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Error;
-    use flow_message::Envelope;
-
-    #[tokio::test]
-    async fn typed_send_recv_roundtrip() {
-        let (tx, mut rx) = channel(4);
-        tx.send(Envelope::new(42i32)).await.unwrap();
-        let mut e = rx.recv::<i32>().await.unwrap();
-        assert_eq!(e.unpack(), 42);      // 发 i32、收回 i32
-    }
-
-    #[tokio::test]
-    async fn recv_wrong_type_is_type_mismatch() {
-        let (tx, mut rx) = channel(4);
-        tx.send(Envelope::new(1i32)).await.unwrap();
-        // 发的是 i32，却想收 String → 类型不符
-        assert!(matches!(rx.recv::<String>().await, Err(Error::TypeMismatch)));
-    }
-
-    #[tokio::test]
-    async fn send_after_receiver_dropped_is_closed() {
-        let (tx, rx) = channel(1);
-        drop(rx);                        // 下游没了
-        let err = tx.send(Envelope::new(1i32)).await.unwrap_err();
-        assert!(matches!(err, Error::ChannelClosed));
-    }
-
-    #[tokio::test]
-    async fn recv_after_senders_dropped_is_closed() {
-        let (tx, mut rx) = channel(1);
-        drop(tx);                        // 上游全没了
-        assert!(matches!(rx.recv::<i32>().await, Err(Error::ChannelClosed)));
-    }
-}
-```
-
-`cargo test -p flow-rs` → **红**：`cannot find function channel`、`cannot find type Error`……契约立好了，下面实现。
-
-> 一个小插曲：这几个 `recv` 测试最初写成 `.unwrap_err()`，编译**不过**——因为 `unwrap_err()` 要打印 `Ok` 里的值，于是要求 `Envelope<T>: Debug`，而我们的 `Envelope` 没实现 `Debug`（`extra_data` 里的 `dyn Any` 无从 `Debug`）。与其为测试便利去给 `Envelope` 强加一个 `Debug`，不如换成 `matches!(..., Err(...))`——只做模式匹配、不打印，表达的是同一个断言。**不为测试的方便而扩大生产类型的约束**，这也是「更少 bug」的一种自律。
-
-## 5. 绿：错误类型 + 通道封装
-
-### 5.1 `Error`：Ch1.1 的 thiserror 承诺兑现
-
-Ch1.1 说过，引擎是库，错误要能被调用方 `match`，所以用 `thiserror` 定义**类型化枚举**。现在它第一次真正写进 `code/`（`code/flow-rs/src/error.rs`）：
-
-```rust,ignore
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("channel closed")]                 // 通道关闭：对端全 drop
-    ChannelClosed,
-    #[error("message type mismatch on recv")]  // recv::<T> 的 T 与真实载荷不符
-    TypeMismatch,
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
-```
-
-注意这里**只放当前用得到的两个变体**。Ch1.1 预告过 `UnknownNode` / `Config`，但那要 Part 2/3 才真正构造——现在加进来只会得到「从未被构造」的死代码告警。**枚举按需生长**，每个变体在被真正 `Err(...)` 出来时才加入。
-
-### 5.2 `channel`：tokio mpsc 的薄封装
-
-先实现下面这个单消费者教学阶段，再按本章后面的容量、批量、限时和多消费者小节扩展。最终 `code/flow-rs/src/channel.rs` 已支持接收端 Clone 与 `&self` 接收；不要把这里的中间代码覆盖到最终版本：
-
-```rust,ignore
-use crate::error::{Error, Result};
-use flow_message::{Envelope, SealedEnvelope};
-use tokio::sync::mpsc;
-
-#[derive(Clone)]
-pub struct Sender {
-    inner: mpsc::Sender<SealedEnvelope>,   // 通道里跑的正是上一章的「封箱信封」
-}
-pub struct Receiver {
-    inner: mpsc::Receiver<SealedEnvelope>,
-}
-
-pub fn channel(capacity: usize) -> (Sender, Receiver) {
-    let (tx, rx) = mpsc::channel(capacity);
-    (Sender { inner: tx }, Receiver { inner: rx })
-}
-```
-
-发送端：`send_any` 直发封箱信封；`send::<T>` 先 `seal` 再走 `send_any`——**类型化只是薄薄一层，落到通道里全是 `SealedEnvelope`**：
-
-```rust,ignore
-impl Sender {
-    pub async fn send_any(&self, msg: SealedEnvelope) -> Result<()> {
-        self.inner.send(msg).await.map_err(|_| Error::ChannelClosed)
-    }
-    pub async fn send<T>(&self, msg: Envelope<T>) -> Result<()>
-    where T: 'static + Send {
-        self.send_any(msg.seal()).await         // ← Ch1.3 的 seal
-    }
-    pub fn is_closed(&self) -> bool { self.inner.is_closed() }
-}
-```
-
-接收端对称：`recv_any` 收封箱信封；`recv::<T>` 收完把类型 `downcast` 回来——用的正是 Ch1.3 那套**零 unsafe** 的安全 downcast，猜错类型返回 `TypeMismatch` 而非崩溃：
-
-```rust,ignore
-impl Receiver {
-    pub async fn recv_any(&mut self) -> Result<SealedEnvelope> {
-        self.inner.recv().await.ok_or(Error::ChannelClosed)   // None = 关闭
-    }
-    pub async fn recv<T>(&mut self) -> Result<Envelope<T>>
-    where T: 'static + Send {
-        let mut sealed = self.recv_any().await?;
-        match sealed.downcast_mut::<Envelope<T>>() {          // ← Ch1.3 的安全 downcast
-            Some(e) => Ok(e.take()),                          // ← Ch1.3 的 take()：取出拥有所有权的信封
-            None => Err(Error::TypeMismatch),
-        }
-    }
-}
-```
-
-`recv::<T>` 这里把 Ch1.3 的三个零件串起来了：`downcast_mut` 认领类型、`take()` 取出一个拥有所有权的 `Envelope<T>`（元信息克隆保留、载荷移动出来）。再跑：
-
-```bash
-cargo test -p flow-rs
-```
+目录如下，每个本章新增文件都在下文完整展示：
 
 ```text
-running 5 tests
-test channel::tests::recv_after_senders_dropped_is_closed ... ok
-test channel::tests::send_after_receiver_dropped_is_closed ... ok
-test channel::tests::recv_wrong_type_is_type_mismatch ... ok
-test channel::tests::typed_send_recv_roundtrip ... ok
-test channel::tests::untyped_send_any_recv_any ... ok
-
-test result: ok. 5 passed; 0 failed
+channel-basic/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── error.rs
+│   └── channel.rs
+└── message/                 # Ch1.3 已完成的消息库，保持原内容
+    ├── Cargo.toml
+    └── src/...
 ```
 
-**绿**。上一章的静态信封，现在能在异步任务间流动了。
+先保留你在 Ch1.3 完成的消息库。若使用教材提供的消息检查点，从教材仓库根目录执行：
 
-## 6. 几个设计决断
+```bash
+mkdir -p /tmp/megflow-channel-study/src
+python3 scripts/message_checkpoint.py --out /tmp/megflow-channel-study/message
+```
 
-第一版用 Tokio MPSC 学习所有权和异步等待，但原版要求多消费者，不能以简化为理由删除。
-本章后续通过共享接收端补上竞争接收。广播则不同：每个下游都得到一份消息，
-需要 Bcast 节点显式克隆；竞争接收只把每条消息交给其中一个消费者。
+这个导出命令要求目标 message 目录不存在，不会覆盖你的工程。它导出当前消息库，包含业务消息扩展；本章代码仅使用 Ch1.3 的 Envelope 和 SealedEnvelope。因而它证明基础通道可独立构建，尚不能替代全书冻结的逐章累计快照验收。手写路线可直接使用你上一章的消息库。
 
-原版 Demux 使用地址路由，不能将它等同于任意消费者抢单。后续迁移要结合 to_addr、
-端口映射与原版节点实现验证，不应仅因名字像“分流”就自行设计另一种行为。
+### Cargo.toml 完整内容
 
-## 7. 对照原版后的剩余边界
+```toml
+{{#include ../../labs/channel-basic/Cargo.toml}}
+```
 
-当前代码支持普通消息的有界/无界队列、共享接收、限时和批量接收。
-原版还包含 flush epoch、类型转换表、ChannelStorage、统计与运行时协作。
-这些仍需要继续迁移。当前错误模型也不等同于原版，尤其不能把所有接收错误都解释为
-永久关闭。真实代码见 `code/flow-rs/src/channel.rs` 与 `error.rs`，测试范围见各小节。
+`[workspace]` 让实验成为独立工作区；`exclude = ["message"]` 允许消息检查点保留自己的工作区根。路径依赖仍然会正常构建它。`version = "1"` 是版本约束，不等于固定某个 Tokio 发布版；实际解析结果保存在 Cargo.lock。自动检查从主工程锁文件选取已验证的依赖版本，离线构建。
 
-## 小结 · Part 1 收官
+本章使用的第三方 crate：
 
-这一章给引擎装上了异步心跳，也补齐了 Part 1 的地基：
+| crate | 用途与关键类型 | feature / 边界 |
+|---|---|---|
+| Tokio | mpsc::Sender、mpsc::Receiver 和测试运行时 | sync、rt、macros；不用网络或定时器 |
+| thiserror | 为 Error 派生 Display 与 std::error::Error | 过程宏生成普通 trait 实现；没有运行时错误收集服务 |
 
-- **异步三件套**：`Future` 是惰性状态机（`poll` 问「好了吗」）；`async fn` 返回 Future；`.await` 是**协作式让出点**——让出任务而非阻塞线程。
-- **理解 Tokio 基础**：原版也使用 Tokio；本章先学习运行时、`spawn` 和队列，扩展协议仍需逐项迁移。
-- **通道封装**：`tokio::sync::mpsc` 薄封装成承载 `SealedEnvelope` 的 `Sender`/`Receiver`；`send_any`/`recv_any` + 类型化 `send::<T>`/`recv::<T>`（seal / 安全 downcast 各薄薄一层）。
-- **错误落地**：`thiserror` 的 `Error` 枚举第一次写进 `code/`，两变体、按需生长。
-- **化简**：广播/demux 上移到节点层，通道保持极简；对比原版削掉大量 unsafe 与自制机制。
+不用 thiserror 也能手写两个 trait；这里减少重复格式化代码。标准库 mpsc 的等待会阻塞线程，不适合作为本章 async 接收的直接替换；Tokio broadcast 则让各订阅者看到消息副本，与这一条竞争队列的契约不同。Tokio 的宏、thiserror 的派生宏还会间接使用 syn、quote、proc-macro2，宏专题会拆解这些编译期依赖。它们不是额外的消息处理任务。
 
-**Part 1 完成**。我们现在有了：能装任意载荷、能类型擦除的**消息层**（`flow-message`），和能在异步任务间搬运它的**通道**（`flow-rs::channel`）。
+### src/lib.rs 完整内容
 
-下一部分 **Part 2 · 节点与过程宏**：让消息真正「被处理」。先手写一个 `Node`/`Actor` trait 和它的 `exec` 循环（不用宏，看清本质），再一头扎进 **过程宏**——`proc-macro2` / `syn` / `quote`，亲手实现 `#[derive(Node)]`、`inputs!`/`outputs!` 和编译期注册表 `node_register!`。那是本书「学 Rust」含金量最高的一段，也是 MegFlow 最有辨识度的设计。
+```rust
+{{#include ../../labs/channel-basic/src/lib.rs}}
+```
 
+这两行把两个文件声明为公开模块。只有文件存在而未声明模块，Rust 不会把它自动加入库。
 
-## 后续开发顺序
+### src/error.rs 完整内容
 
-通道的进阶实现已拆成四课，请按顺序完成，不要只读本章的基础队列就认为原版协议已经齐全。
+```rust
+{{#include ../../labs/channel-basic/src/error.rs}}
+```
 
-- [Ch1.4b 通道协议：容量、批量、限时与竞争接收](ch04b-channel-protocols.md)：能解释容量 0 的含义、权重与条数的差别，以及多个接收者为何不会自动广播。
-- [Ch1.4c 类型化与默认端点](ch04c-typed-endpoints.md)：能独立实现 SenderT/ReceiverT，并区分默认端点与实际创建的队列。
-- [Ch1.4d 类型信息与转换表](ch04d-type-conversion.md)：能画出端口类型 → 队列类型 → 端口类型的转换方向，并用 repack 保留消息上下文。
-- [Ch1.4e 取消、超时与任务错误](ch04e-cancellation-errors.md)：能根据消息的所有权所在阶段解释取消结果，并区分业务 Err 与任务 panic。
+`#[derive(Debug, thiserror::Error)]` 生成调试输出和标准错误 trait；每个 `#[error(...)]` 决定 Display 文本。`Result<T>` 是标准 Result 的类型别名，固定错误类型，成功值 T 仍由调用处决定。
+
+这里的 ChannelClosed 表示当前操作无法继续收发，不表示整个图的全部任务都退出；TypeMismatch 表示已经收到一个真实类型不匹配的消息。本阶段把接收的 None 映射到关闭错误，不能据此声称原版 flush、abort、空信号等协议都只有这两类错误。
+
+### src/channel.rs 完整内容（包括五项测试）
+
+```rust
+{{#include ../../labs/channel-basic/src/channel.rs}}
+```
+
+## 5. 逐段理解所有权与失败路径
+
+### 创建队列
+
+`channel` 同时返回发送端和接收端。两者连接同一条队列，而不是各有一份消息列表。发送端可以 Clone：新增一个生产者句柄，不会复制队列中的消息；接收端独占出队权，所以本阶段使用 `&mut self`。
+
+本阶段明确拒绝容量 0；这是尚未演进的教学实现，**原版容量 0 的契约是无界**，后续 Ch1.4b 必须补齐，不能把这里的 assert 当成最终行为。
+
+### 发送：把值交给队列
+
+`send<T>` 消耗 `Envelope<T>`，调用 seal 转为类型擦除消息，再传给 send_any。这里 T 必须 Clone + Send + 'static：
+
+- Send 允许载荷在任务所在的线程间转移。
+- 'static 排除借用即将失效的栈数据，不要求消息一直活到程序结束。
+- Clone 是上一章可克隆的类型擦除信封所需约束；本通道不会为了每次 send 主动克隆载荷。
+
+队列满时，send 返回的 Future 等待空位。接收端已被丢弃时，Tokio 返回携带未发送消息的 SendError；本版 map_err 将它转为 ChannelClosed，因此其中的消息也被丢弃，调用者拿不到消息再重试。这是需要明确的 API 选择。
+
+### 接收：先出队，再认领类型
+
+recv_any 用 `Option::ok_or` 把 Some(message) 转成 Ok(message)，把 None 转成 ChannelClosed。所有发送句柄消失后，接收端仍先排空队列，随后才收到 None。
+
+`recv<T>` 在出队后调用 downcast_mut 检查真实类型，得到对内部 `Envelope<T>` 的可变借用，再用 take 把载荷移到一个由调用者拥有的信封。不能直接返回这个借用，因为局部变量 message 会在函数返回时销毁。
+
+如果猜错 T，消息已经出队，本函数返回 TypeMismatch 并销毁它，**不会退回队列**。下一次 recv 读取下一条。测试 wrong_type_consumes_only_that_message 同时断言错误和下一条结果，避免只测“出错了”而漏掉所有权后果。
+
+### await 不保证让出
+
+当队列有空位或有消息时，相应 Future 可以第一次 poll 就 Ready，await 便直接继续。本章的有限测试利用这一点按顺序发送和接收；若先在容量 1 的队列上连续发送两条、再接收，同一个任务就会卡在第二次发送，永远走不到接收。需要并发生产者/消费者的场景见异步三步实验。
+
+## 6. 运行、预期结果和检查边界
+
+把上面的完整文件写进实验目录后运行：
+
+```bash
+cargo test --manifest-path /tmp/megflow-channel-study/Cargo.toml --offline
+```
+
+若本机还没缓存 Tokio/thiserror，第一次去掉 --offline 下载依赖并生成锁文件，此后保留它复现。五个测试都应通过：
+
+| 测试 | 必须断言的行为 |
+|---|---|
+| typed_roundtrip_preserves_metadata | 载荷 7，目标地址 Some(42) |
+| untyped_roundtrip | 封箱直通后仍可认领为 u32，值为 9 |
+| wrong_type_consumes_only_that_message | 第一条类型错误，第二条仍是 i32 的 2 |
+| last_sender_drop_drains_before_close | 剩余发送克隆仍可发；最后克隆消失后先取出 3，再报关闭 |
+| receiver_drop_rejects_send | 接收端 drop 后发送返回 ChannelClosed |
+
+测试顺序和耗时不固定；验收是 `5 passed; 0 failed` 与退出码 0。测试中的等待都有预先入队消息或已确定的关闭状态，没有用 sleep 猜调度顺序。维护脚本另设进程超时，防止实现退化后无限挂住。
+
+教材仓库根目录运行自动验证：
+
+```bash
+python3 scripts/check_basic_channel_course.py
+```
+
+脚本复制本章独立文件和消息检查点，在新临时目录离线编译。不会复制 flow-rs 的最终 channel、registry 或图代码。
+
+## 7. 排错实验与独立练习
+
+1. 删除 `send<T>` 的 Clone 约束，运行 cargo check，观察 seal 要求 Clone 的编译诊断。错误来自封箱接口，不来自 Tokio mpsc。恢复约束。
+2. 在最后发送端关闭测试中保留 other 不 drop，最后一次 recv 将等待未来消息而非关闭。只运行这一项测试并手动停止，随后恢复代码；不要把这种故意挂起的版本提交到自动测试。
+3. 将容量改成 0，观察本阶段明确的 panic；然后阅读 Ch1.4b，说明为什么最终实现必须选择无界队列，不能仅删除 assert 后继续调用 Tokio bounded channel。
+4. 不看实现重写 `recv<T>`，解释类型检查、载荷移动、元信息保留分别发生在哪里，并用五个测试验收。
+
+原版对照时，应分别查看固定提交的通道收发实现、关闭处理和类型错误处理。本章五项测试验证的是这个明确缩小的教学阶段，不足以标记原版通道“行为已验证”。完整协议还需要竞争接收、默认端点、转换缓存、批量/限时、关闭与 abort、flush/epoch、空信号和统计。
+
+## 8. 接下来按协议演进
+
+- [Ch1.4b 通道协议](ch04b-channel-protocols.md)：有界/无界、权重批量和竞争接收。
+- [Ch1.4c 类型化与默认端点](ch04c-typed-endpoints.md)：SenderT/ReceiverT 与默认端点。
+- [Ch1.4d 类型信息与转换表](ch04d-type-conversion.md)：发送侧和接收侧的转换方向。
+- [Ch1.4e 取消、超时与任务错误](ch04e-cancellation-errors.md)：根据消息所有权解释取消后果。
+
+完成这些课后再进入节点实现。第一版队列是理解数据如何移动的起点，不能替代后续的原版协议验收。

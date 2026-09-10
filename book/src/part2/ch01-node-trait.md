@@ -54,7 +54,7 @@ pub trait Actor: Node + Send + 'static {
 }
 ```
 
-这短短几行里藏着**两个关键的 Rust 设计决断**，都值得停下来看清楚。
+这短短几行里藏着**两个关键的 Rust 设计决断**，都值得停下来看清楚。（这里是**本章手写阶段的简化签名**——终点 `start` 多带一个 `ctx: Context` 入参，那是 Ch4.3「资源与上下文」引入的、不影响对象安全，见 §8 的真实 include。）
 
 ### 2.1 为什么 `start` 不是 `async fn`？——为了对象安全
 
@@ -116,11 +116,11 @@ async fn doubler_pipes_and_shuts_down() {
 
 ## 4. 绿（一）：定义两个 trait
 
-先把 §2 的 `Node`/`Actor` 落进 `node.rs`。它们就是上面那两段——不重复贴了。加上 `pub mod node;` 到 `lib.rs`，trait 部分就位。
+先把 §2 的 `Node`/`Actor` 落进 `node.rs`。它们就是上面那两段——不重复贴了（终点真实 trait 见 §8 的 include，仅 `start` 多一个 `ctx: Context`）。加上 `pub mod node;` 到 `lib.rs`，trait 部分就位。
 
 ## 5. 绿（二）：手写 `Doubler` 的**全部**样板
 
-现在把 `Doubler` 从头写全。请**边写边数**：哪些是业务、哪些是样板。
+现在把 `Doubler` 从头写全。请**边写边数**：哪些是业务、哪些是样板。（下面是**本章手写阶段示意**——终点真实源码见 §8 的 `{{#include}}`，差别只有 Ch4.3 引入的 `Context`：`initialize` 收 `&Context`、`start` 收 `ctx`。）
 
 ```rust,ignore
 struct Doubler {
@@ -171,7 +171,7 @@ impl Actor for Doubler {                                   // ← 样板：整�
 
 **停机是怎么发生的**，顺着数据流走一遍就清楚了：测试里 `drop(in_tx)` 撤走唯一的上游 → `Doubler` 的 `recv` 返回 `Err(ChannelClosed)` → `exec` 把 `input_closed` 置真 → 下一轮 `while` 判定退出 → `close()` 把 `out` 置 `None`、drop 掉输出 `Sender` → 测试里的 `out_rx.recv` 也随之返回 `Err`、`while let` 收尾 → `handle.await` 拿到任务的 `Ok(())`。**关闭像涟漪一样从上游一路传到下游**，没有一个节点需要「被通知」停机——channel 的关闭语义自己就是信号。这正是 Ch1.4 把 `ChannelClosed` 定为一等错误的回报。
 
-`cargo test -p flow-rs`：
+`cargo test -p flow-rs`（**本章阶段**只有 Ch1.4 的 channel 测试 + 本章两个节点测试；随着后续章节加模块，同一条命令的总数会增长，终点是 33 个）：
 
 ```text
 running 7 tests
@@ -233,7 +233,37 @@ node_register!("Doubler", Doubler);
 - **源节点（Producer）的循环**：`Doubler` 有输入，靠「输入关闭」退出。但像 `GliderServer` 这种**没有输入**的源节点，`is_all_input_closed` 恒为「空真」，循环语义不一样（它自己决定何时产出、何时停）。这个话题连同 `Context` 一起放到 Part 3/相应章。
 - **多输入端口**：`is_all_input_closed` 的「all」在多输入时才有意义（要所有输入都关了才退）。本章单输入，多路输入等 Ch4.2 `merge`。
 
-真实代码见 `code/flow-rs/src/node.rs`（trait + `Doubler` 夹具 + 2 测试）。
+## 8. 本章终点与复现
+
+前面 §2/§5 的代码块是**本章手写阶段的示意**——为了「边写边数样板」而略去了后续才引入的东西。下面是终点 `code/flow-rs/src/node.rs` 里**真实、可编译**的两段：`Node`/`Actor` 双 trait（生产代码），以及 `#[cfg(test)]` 里手写的 `Doubler` + 2 个测试。
+
+**两个 trait（真实源码）**：
+
+```rust
+{{#include ../../../code/flow-rs/src/node.rs:node_traits}}
+```
+
+**手写 `Doubler` 节点（真实源码，`mod tests` 内的夹具）**：
+
+```rust
+{{#include ../../../code/flow-rs/src/node.rs:doubler}}
+```
+
+**两个测试（真实源码）**：
+
+```rust
+{{#include ../../../code/flow-rs/src/node.rs:doubler_tests}}
+```
+
+> **与本章手写示意的唯一落差：`Context`**。终点 `Actor::start(self: Box<Self>, ctx: Context)` 比 §2 多一个 `ctx` 入参、`Doubler::initialize(&mut self, _ctx: &Context)` 多一个 `&Context`，对应测试里 `node.start(Context::anonymous())` 传一个空上下文。这是 **Ch4.3「资源与上下文」**才引入的：图装配期一次建好的共享资源（模型 / 内存池）随 `ctx` 穿过 `start` → `initialize`，节点按名借出、暂存到 `#[state]` 字段。关键收益是**资源没有渗进 `exec`**——本章 `exec(&mut self)` 的签名到终点原封不动，几十个节点的 `exec` 无需改动。`ctx: Context`（`Sized`）也**不破坏对象安全**，`Box<dyn Actor>` 依旧成立（§2.1 的结论不变）。本章的心智模型里把这个参数读作「空上下文占位」即可，来龙去脉 Ch4.3 讲透。
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --lib node::tests --locked   # 手写节点的 exec 循环 + 优雅停机 + 对象安全
+```
+
+预期：`doubler_pipes_and_shuts_down`、`runs_behind_boxed_dyn_actor` 两个测试通过。
 
 ## 小结
 

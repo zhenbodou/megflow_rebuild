@@ -19,37 +19,10 @@ flowchart LR
 
 ## 2. 从 `TestBinaryOp` 到内置 `BinaryOp`
 
-Ch3.2、Ch3.3 的测试里都躺着一个 `TestBinaryOp`——两输入 `a`/`b`、一输出 `c`、一个 `op` 参数，`exec` 里各收一个操作数、按 `op` 运算、发往 `c`。它一直**定义在测试文件里**，只有那个测试二进制看得见。本章把它原样搬进 `flow-rs/src/builtin.rs`，改名 `BinaryOp`，成为**随 crate 发货**的内置节点：
+Ch3.2、Ch3.3 的测试里都躺着一个 `TestBinaryOp`——两输入 `a`/`b`、一输出 `c`、一个 `op` 参数，`exec` 里各收一个操作数、按 `op` 运算、发往 `c`。它一直**定义在测试文件里**，只有那个测试二进制看得见。本章把它原样搬进 `flow-rs/src/builtin.rs`，改名 `BinaryOp`，成为**随 crate 发货**的内置节点（下面是 `builtin.rs` 里的真实源码，`{{#include}}` 嵌入）：
 
-```rust,ignore
-#[inputs(a, b)]
-#[outputs(c)]
-#[derive(Node, Actor, BuildFromPorts)]
-pub struct BinaryOp {
-    op: String,
-}
-
-#[methods]
-impl BinaryOp {
-    async fn exec(&mut self) -> Result<()> {
-        let mut ea = self.a.recv::<i32>().await?;
-        let mut eb = self.b.recv::<i32>().await?;
-        let (x, y) = (ea.unpack(), eb.unpack());
-        let r = match self.op.as_str() {
-            "+" => x + y,
-            "-" => x - y,
-            "*" => x * y,
-            "/" => x / y,
-            other => return Err(Error::Arg { key: "op".into(), msg: format!("未知运算符 {other:?}") }),
-        };
-        if let Some(out) = self.c.as_ref() {
-            out.send(ea.repack(r)).await?;
-        }
-        Ok(())
-    }
-}
-
-node_register!("BinaryOp", BinaryOp);
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:binary_op}}
 ```
 
 写法和下游用户会写的节点**没有任何区别**——同一套 `#[inputs]`/`#[methods]`/`#[derive]`/`node_register!`。区别只在**它住在哪**：内置节点住在引擎 crate 里。而「住在 crate 内部」恰好触到一个前几章一直绕开的坎。
@@ -157,49 +130,18 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test sandbox_envelopes -
 
 测试在 `tests/binary_op_e2e.rs`。它**不再自己定义节点**——`BinaryOp` 已在引擎里注册，测试只按名字 `"BinaryOp"` 引用它。这本身就证明「节点真的进了引擎」。
 
-**路径一 · 完整图**：喂给 `Builder` 的，正是 Ch0.3 契约里那段一字不差的 TOML。
+**路径一 · 完整图**：喂给 `Builder` 的，正是 Ch0.3 契约里那段一字不差的 TOML（下面是 `tests/binary_op_e2e.rs` 里的真实测试）：
 
-```rust,ignore
-const BINARY_OP_GRAPH: &str = r#"
-main = "example"
-[[graphs]]
-name = "example"
-nodes = [ {name="add", ty="BinaryOp", op="+"} ]
-inputs = [
-    {name="a", cap=16, ports=["add:a"]},
-    {name="b", cap=16, ports=["add:b"]}
-]
-outputs = [{name="c", cap=16, ports=["add:c"]}]
-"#;
-
-let mut g = Builder::default().template(BINARY_OP_GRAPH).build().unwrap();
-let handle = g.start();                          // Ch3.3 调度
-let a = g.input("a").unwrap();
-let b = g.input("b").unwrap();
-let mut c = g.take_output("c").unwrap();
-a.send(Envelope::new(1i32)).await.unwrap();
-b.send(Envelope::new(2i32)).await.unwrap();
-assert_eq!(c.recv::<i32>().await.unwrap().unpack(), 3);   // ← 里程碑
-drop(a); drop(b); g.stop();
-handle.await.unwrap().unwrap();
+```rust
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:graph_path}}
 ```
 
-这一条断言 `== 3` 把**七章的链**一次跑通：TOML 经 Ch3.1 解析、Ch3.2 装配校验、Ch3.3 调度，喂进 Ch3.4 的内置 `BinaryOp`，算出 `3` 从 `c` 吐出。**Part 0 钉下的验收契约，在这一行兑现。**
+这一条断言 `== 3` 把**七章的链**一次跑通：TOML 经 Ch3.1 解析、Ch3.2 装配校验、Ch3.3 调度，喂进 Ch3.4 的内置 `BinaryOp`，算出 `3` 从 `c` 吐出。**Part 0 钉下的验收契约，在这一行兑现。**（图配置 `BINARY_OP_GRAPH` 常量见同文件顶部。）
 
 **路径二 · Sandbox**：同样的 `1 + 2 == 3`，但不写一行 TOML。
 
-```rust,ignore
-let args: Args = toml::from_str(r#"op = "+""#).unwrap();
-let collected = Arc::new(Mutex::new(Vec::new()));
-let sink = collected.clone();
-
-let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-sb.add_data("a", |i| if i == 0 { Some(1i32) } else { None })
-  .add_data("b", |i| if i == 0 { Some(2i32) } else { None })
-  .add_check("c", move |v: i32| sink.lock().unwrap().push(v));
-sb.start().await.unwrap();
-
-assert_eq!(*collected.lock().unwrap(), vec![3]);
+```rust
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:sandbox_path}}
 ```
 
 两条路径从**两个入口**逼近同一个结果：一条走完整配置驱动的全链，一条走极简的单节点直连。前者证明**引擎**通了，后者给出**测节点**的顺手工具。
@@ -208,15 +150,11 @@ assert_eq!(*collected.lock().unwrap(), vec![3]);
 
 顺带验一条错误支线——`op="%"` 是未知运算符，`exec` 收到数据后返回 `Err(Arg)`，这个错误应当**抬到** `Sandbox::start` 的返回值，而非被静默吞掉：
 
-```rust,ignore
-let args: Args = toml::from_str(r#"op = "%""#).unwrap();
-let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
-sb.add_items("a", vec![1i32]).add_items("b", vec![2i32]);
-let result: Result<()> = sb.start().await;
-assert!(matches!(result, Err(Error::Arg { .. })));
+```rust
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:error_path}}
 ```
 
-它钉死的和 Ch3.3 错误支线同源：节点的**业务错误**经任务收尾、经那句 `node.await...?` 的**内层**原样抬出——`Arg`，不是 `TaskJoin`。实际通过数量以当前测试输出为准；增加测试后不沿用旧章节的历史数字。
+它验证当前重构的错误支线：节点的业务错误经任务收尾、经 `node.await...?` 的内层抬出，得到 Arg。**这里尚与原版不一致**：原版上手示例的未知运算符进入 `unreachable!()`，产生 panic；当前实现返回业务错误。行为兼容包括错误种类，不能把这项测试通过写成原版错误路径已验证。后续必须对齐并更新对应测试和教学，或明确记录为经批准的行为变化。
 
 ## 小结
 
@@ -241,7 +179,41 @@ assert!(matches!(result, Err(Error::Arg { .. })));
 4. 用五秒超时包住测试，防止接收或停机死锁让测试无限等待。
 5. 在 `code/` 执行 `cargo test -p flow-rs --test binary_op_e2e`。
 
-参考实现中的 `all_operations_preserve_left_envelope_metadata` 是完整测试。
+参考实现中的 `all_operations_preserve_left_envelope_metadata` 是完整测试（`{{#include}}` 取自 `tests/binary_op_e2e.rs`）：
+
+```rust
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:metadata_test}}
+```
+
 整数除法截断小数；本节点与原版示例一样使用 Rust 的整数运算，除零及
 `i32::MIN / -1` 会 panic。生产业务若要改为结构化错误，应明确记录为行为变更，
 不能把它当作已经证明与原版一致。
+
+## 本章终点与复现
+
+**验收命令**（照抄可跑，四项测试全绿）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test binary_op_e2e --locked
+```
+
+预期：
+
+```text
+test binary_op_end_to_end_via_graph ... ok
+test sandbox_runs_single_binary_op ... ok
+test sandbox_surfaces_node_error ... ok
+test all_operations_preserve_left_envelope_metadata ... ok
+```
+
+下面给出本章端到端测试文件的完整内容，包含前面片段省略的导入、配置常量和所有测试。将它写入 `code/flow-rs/tests/binary_op_e2e.rs` 后运行上面的命令。
+
+```rust
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs}}
+```
+
+下面是 Sandbox 的完整当前实现，用来核对前面分段解释的构造、回调登记、端口转移与任务收尾。它已包含后续标签端口的接入，不能把完整当前文件的编译成功当成 Ch3.4 从前一章累计构建成功。
+
+```rust
+{{#include ../../../code/flow-rs/src/sandbox.rs}}
+```

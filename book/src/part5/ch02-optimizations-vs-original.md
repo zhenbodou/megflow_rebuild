@@ -21,7 +21,7 @@
 
 **原版**:错误借道 `anyhow::Result`——一个动态的、把任何 `Error` 装箱、主要靠字符串描述的错误类型。下游一律 `use anyhow::Result;`（Ch5.1 §4 见过）。
 
-**我们**（Ch1.4）:一个 `thiserror` 派生的枚举，按需一个变体一个变体地长出来:
+**我们**（Ch1.4）:一个 `thiserror` 派生的枚举，按需一个变体一个变体地长出来（下面是**简化示意**，完整 18 变体见 Ch1.4 已 `{{#include}}` 进书里的 `error.rs`）:
 
 ```rust,ignore
 #[derive(Debug, Error)]

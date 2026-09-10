@@ -10,7 +10,7 @@
 
 ## 1. 从一段 TOML 到一组结构
 
-Ch0.3 的契约表里，图是这样写出来的（一字不差）：
+Ch0.3 的示例可写成以下等价 TOML（空白排版不影响解析）：
 
 ```toml
 main = "example"
@@ -59,7 +59,7 @@ let cfg: Config = toml::from_str(text)?;
 
 ## 3. `config.rs`：四个结构
 
-schema 里有四种东西——整份配置、一张图、一个节点、一个端口——就写四个结构，逐一对应：
+schema 里有四种东西——整份配置、一张图、一个节点、一个端口——就写四个结构，逐一对应（**本章教学子集示意**：终点 `GraphConfig` 还长了 `connections`/`resources` 两个字段，见下方 §3.3 末的教学子集声明与 §7 的真实 include）：
 
 ```rust,ignore
 use serde::Deserialize;
@@ -133,11 +133,11 @@ grahps = []     # ← 拼错了
 
 而 `main` 字段**没有** default、也不是 `Option`——它是**必填**的。缺了 `main`，`toml::from_str` 直接报 `missing field 'main'`。这是我们用类型系统表达的一条约束：一份图配置必须指明入口图。
 
-> **教学子集声明**：这四个结构是原版 `config/presentation.rs` 的**精简版**——只覆盖 BinaryOp 里程碑用到的字段。原版还有 `connections`（图内节点互连）、`resources`（共享资源）、子图 `features`、`include`（拆分多文件）等。它们分别留到 Part 4 的相应章节，届时**往这几个结构上加字段**即可（just-in-time：后段要用的 API，靠后段真实需求钉死，不提前臆造）。
+> **教学子集声明**：这四个结构是原版 `config/presentation.rs` 的**精简版**——只覆盖 BinaryOp 里程碑用到的字段。原版还有 `connections`（图内节点互连）、`resources`（共享资源）、子图 `features`、`include`（拆分多文件）等。它们分别留到 Part 4 的相应章节，需要同时实现字段解析、后续转换与行为测试；只加字段不能实现这些配置的业务语义。
 
 ## 4. `PortRef`：零拷贝拆 `"node:port"`
 
-端口引用 `"add:a"` 是接线的最小单位——它得拆成「哪个节点」+「哪个端口」，Ch3.2 的 Builder 才知道把 channel 接到哪。我们给它一个专门的类型：
+端口引用 `"add:a"` 是接线的最小单位——它得拆成「哪个节点」+「哪个端口」，Ch3.2 的 Builder 才知道把 channel 接到哪。我们给它一个专门的类型（**本章示意**：终点 `PortRef` 多一个 `tag: Option<u64>` 字段、`parse` 委托给 `interlayer::Port::parse` 支持 `"node:port:tag"` 地址标签，见 §7 真实 include）：
 
 ```rust,ignore
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,14 +189,82 @@ impl Config {
 
 为什么这么切？因为跨引用校验需要**全局视野**（要同时看到所有节点、所有端口才能判断一个引用对不对），而它天然属于「装配」这道工序。把它放在 `build()` 里，我们就有了一个**单一的、集中的校验点**。当前实现通过 `?` 返回遇到的错误，并不一次收集所有错误；原版也在配置处理阶段校验连接与推断类型。本章的解析层只做它该做的：把文本变成结构，把结构里能免费查的（拼写、必填、格式）用 serde 属性查掉。
 
-## 6. 测试：钉死 schema 与端口拆分
+## 6. 本章完整文件与独立构建
 
-`config.rs` 里的单元测试分两组：
+前面为了讲解分段展示了类型和方法；下面给出同一基础阶段的完整工程。它不引用后续的资源、模板推导或运行时模块，也不混入最终源码的资源测试。
 
-- **schema 解析**：`parses_binary_op_graph` 拿 Ch0.3 那段一字不差的 BinaryOp TOML，逐字段断言解析结果（`main=="example"`、节点 `name/ty`、`args["op"]=="+"`、端口 `cap/ports`）；`node_args_capture_extra_keys_but_not_name_ty` 塞进 `alpha=1, beta="two", flag=true` 三种类型的多余键，验证它们全落进 `args`、而 `name`/`ty` **不**混进去；`unknown_top_level_field_is_rejected` 用拼错的 `grahps` 验证 deny 挡住笔误；`missing_main_is_error` 验证必填字段缺失即报错。
-- **端口引用**：`port_ref_splits_node_and_port` 验证 `"add:a"` → `node="add"`/`port="a"`；`port_ref_rejects_malformed` 遍历 `["adda", "add:", ":a", ""]`，验证都被拒成 `BadPortRef`。
+先在一个不属于其他 Cargo 工作区的新目录建立以下文件：
 
-这些测试就是**契约的可执行版本**——schema 一旦被改动而偏离 Ch0.3，测试立刻变红。
+```text
+config-basic/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── error.rs
+    └── config.rs
+```
+
+### Cargo.toml
+
+```toml
+{{#include ../../labs/config-basic/Cargo.toml}}
+```
+
+Serde 的 derive feature 引入派生宏，生成 Deserialize 实现；toml 提供具体文本格式的解析器及 Value/Table；thiserror 为两个错误分支生成标准错误 trait。这里不依赖 flow-rs，因此也不会意外使用后续图构造功能。`[workspace]` 让实验拥有独立工作区根。
+
+公开包的版本约束不等于精确版本；Cargo.lock 记录实际解析版本。首次构建后保留锁文件。维护脚本从主工程锁文件选取缓存的依赖版本并离线检查。
+
+### src/lib.rs
+
+```rust
+{{#include ../../labs/config-basic/src/lib.rs}}
+```
+
+### src/error.rs
+
+```rust
+{{#include ../../labs/config-basic/src/error.rs}}
+```
+
+`Toml(#[from] ...)` 同时保存底层解析错误并生成 From 转换，因而 from_toml 中的问号能传播成此处的 Error。BadPortRef 保存错误输入的拥有型 String：调用者可在原始配置释放之后显示错误。这与成功 PortRef 借用原文的选择不同。
+
+### src/config.rs（包括全部六项测试）
+
+```rust
+{{#include ../../labs/config-basic/src/config.rs}}
+```
+
+from_toml 负责反序列化；main_graph 只查找引用，缺失时返回 None。后者不会消费 Config：返回的 GraphConfig 引用要求原 Config 继续存活。测试使用 String 的内存地址验证 node 切片来自原文，既检查内容也检查没有为该字段额外复制字符串。
+
+## 7. 验收与排错
+
+从 config-basic 目录执行：
+
+```bash
+cargo test
+cargo test --offline
+```
+
+首次命令准备依赖和锁文件；缓存齐全后第二次应离线成功。预期是六项测试通过、零失败、退出码 0。测试分别验证完整 BinaryOp 字段和参数、缺省列表、main 的必填及类型、未知字段、借用式引用拆分和畸形引用。耗时与测试执行顺序不属于断言。
+
+教材仓库根目录的维护命令为：
+
+```bash
+python3 scripts/check_basic_config_course.py
+```
+
+它在全新临时目录复制上面四份完整文件，离线运行测试，不复制最终 flow-rs。接着完成 [配置分层实验](ch01a-config-workshop.md)，验证“文本能解析”与“能按类型构造业务节点”是两件事。
+
+故意破坏两处再恢复：
+
+1. 删除 Config 上的 deny_unknown_fields，未知字段测试应失败，因为 grahps 被忽略。观察错误发生的阶段，不要靠修改断言让坏行为变绿。
+2. 删除 graphs 的 default，只包含 main 的输入应解析失败。解释 default 处理缺失字段，而不是把错误类型改成正确类型。
+
+独立练习：增加同名图检测，并分别验证找不到入口和重复名字的错误。不要在 Deserialize 派生宏里寻找“全局唯一”开关；这是需要自己编写的跨对象检查。
+
+本章基础 schema 不是原版完整配置协议。当前教学选择 deny_unknown_fields，也不自动证明原版同层具有相同的拒绝规则。include、参数覆盖、图端口重写、连接和模板推导需要逐项对照原版配置流水线，不能仅靠添加字段完成。
+
+此外，本章 split_once 只按第一个冒号分割：`add:a:7` 会暂时把 `a:7` 整体视作端口名。后续带标签端口课必须升级解析规则并增加测试；不要把这一阶段的借用演示当成标签协议的最终实现。
 
 ## 小结
 

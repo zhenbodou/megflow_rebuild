@@ -159,6 +159,8 @@ fn take_i32(e: &dyn AnyEnvelope) -> Option<&Envelope<i32>> {
 
 `as_any` 本身不带泛型（对象安全无虞），而真正带泛型的 downcast 由 `std` 的 `dyn Any` 提供、**天然安全**。这样我们既保留了原版的类型擦除能力，又抹掉了那段手写 `unsafe`——是「实现更简、更少 bug」这个目标的一个具体落点。（Ch1.3 会把这套真正写进 `code/flow-message` 并用测试钉死。）
 
+> **与 Ch1.3 真实 `AnyEnvelope` 的落差（本节是 principles 预览）**：上面的 trait 是**原理预览**。真实定义（Ch1.3 已 `{{#include}}` 进 `code/flow-message/src/envelope.rs`，其 doc 注释反过来引用「Ch1.2 §4/§5」）在 `as_any`/`as_any_mut`/`is_some`/`is_none`/`info`/`info_mut` 之外，还多一个 `fn clone_box(&self) -> SealedEnvelope`——在**类型擦除下克隆**自己：擦掉 `M` 后标准库 `Clone` 用不上（trait 对象非 `Sized`、也不知道怎么复制具体类型），于是把「克隆一份再封箱」的能力**烙进 trait**（等价于 `dyn-clone` crate 的手写版）。它把实现前提从「`M: 'static`」收紧到「`M: 'static + Send + Clone`」，正是 Ch4.2 广播 `Bcast`「每个下游各得一份」的前提。本章 §4 的对象安全红线对它同样成立：`clone_box` 返回的是**具体的** `SealedEnvelope`（不是泛型 `Self`），故不破坏 vtable。这也是本章的两个概念例子（`Circle`/`Square`/`Area`、`max`/`Slot`）与 MegFlow 真实类型的关系——它们是讲原理的**通用 Rust 教具**、`code/` 里没有对应物；类型擦除的真实落地全在 Ch1.3。
+
 ## 小结
 
 这一章把引擎类型设计的枢纽讲透了：

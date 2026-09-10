@@ -71,6 +71,7 @@
 - [Ch4.7a 让地址标签真正到达构造器](part4/ch07a-tagged-construction.md)
 - [Ch4.7b 实现字典端口宏与按地址装配](part4/ch07b-dictionary-ports.md)
 - [Ch4.7c 把 Demux 装进真实图](part4/ch07c-demux-node.md)
+- [Ch4.8 Broker：给动态子图广播通知](part4/ch08-broker.md)
 
 # 第 5 部分 · 兼容 · 优化 · 收尾
 

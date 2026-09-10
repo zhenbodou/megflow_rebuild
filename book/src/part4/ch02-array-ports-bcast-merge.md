@@ -55,7 +55,9 @@ impl Parse for PortSpec {
 }
 ```
 
-> **一个刻意从简的取舍**：原版数组端口写作 `name:[T0]`——方括号里带一个**每端口的类型变量**。我们的写法是**裸的空方括号** `name[]`，括号里就算写了东西也一律忽略。差别的根源在 Ch1.3/Ch1.4：重写版的 channel 在**字段层是未类型化**的（`Sender`/`Receiver` 都搬 `SealedEnvelope`，类型信息在 `recv::<T>()` 那一刻才 `downcast` 回来）。既然字段不带类型参数，那套 `[T0]` 类型变量机制就无处安放、也无必要——省掉它，语法更干净，解析器少一半分支。
+> **一个分阶段的取舍（先简化、后补齐）**：原版数组端口写作 `name:[T0]`——方括号里带一个**每端口的类型变量**（模板编号）。本章这一里程碑先用**裸的空方括号** `name[]`，括号里就算写了东西也一律忽略。为什么能先省掉 `[T0]`？因为重写版的 channel 在**字段层是未类型化**的（`Sender`/`Receiver` 都搬 `SealedEnvelope`，类型信息在 `recv::<T>()` 那一刻才 `downcast` 回来）——字段本身不带类型参数，`Bcast`/`Merge` 的 `recv_any`/`send_any` 也不看具体类型，所以此刻 `name[]` 已经够把扇出/扇入跑通，解析器还少一半分支。
+>
+> 但**这不是终点**：`[T0]` 里的模板编号并非可有可无的装饰，它是后续**跨连接类型推导**的钥匙（`inp:T0` 与 `out:[T0]` 靠同一个编号 `0` 关联起来，让推导把一条边的具体类型传播到关联端口）。所以发货源码后来把这套语法**补齐**成了原版的 `inp:T0` / `out:[T0]`——这一步连同模板元数据如何跨「属性宏 → 派生宏」两个阶段传递，专门放在**宏专题第 11 课「亲手解析 MegFlow 的端口语言」**里讲透。本章聚焦「一名多端」这件事本身，先用 `name[]` 把地基夯实；读到第 11 课时，你会看到同一个 `Bcast`/`Merge` 的端口声明升级成 `inp:T0`/`out:[T0]` 后，**收发算法一字不差**——升级的只是端口语法与类型关联，不是节点行为。
 
 属性宏据此注入字段：数组端口给 `Vec<_>`，标量端口维持 Ch2.3 的老样子。
 
@@ -156,11 +158,11 @@ for &port in reg.inputs {
 
 ## 5. `Bcast`：数组输出扇出
 
-`Bcast` 收一条消息、往**每个**下游发一份副本。数组输出 `out: Vec<Sender>`，发送策略用 `split_last`——对「除最后一个之外」的下游发 `msg.clone()`，最后一个直接**搬走原件**省掉一次克隆：
+`Bcast` 收一条消息、往**每个**下游发一份副本。数组输出 `out: Vec<Sender>`，发送策略用 `split_last`——对「除最后一个之外」的下游发 `msg.clone()`，最后一个直接**搬走原件**省掉一次克隆。下面是**本里程碑的简化示意**（端口声明用本章的 `out[]`）：
 
 ```rust,ignore
 #[inputs(inp)]
-#[outputs(out[])]
+#[outputs(out[])]                 // 简化示意语法；发货源码升级为 out:[T0]，见 §2 与宏专题第 11 课
 #[derive(Node, Actor, BuildFromPorts)]
 pub struct Bcast {}
 
@@ -182,6 +184,12 @@ impl Bcast {
 node_register!("Bcast", Bcast);
 ```
 
+发货源码里 `Bcast` 的**真实定义**如下（`{{#include}}` 取自 `code/flow-rs/src/builtin.rs`）——留意端口声明是升级后的 `inp: T0` / `out: [T0]`，但 `exec` 的收发算法与上面**逐字相同**：
+
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:bcast}}
+```
+
 两个细节：
 
 - **`msg.clone()` 何以可能**——`SealedEnvelope` 在 Ch1.3 就做了「类型擦除的克隆」（`clone_box`）。正因为封箱消息可克隆，广播才成立；这也回收了 `channel::send<T>` 要求 `T: Clone` 那条约束的价值。
@@ -189,10 +197,10 @@ node_register!("Bcast", Bcast);
 
 ## 6. `Merge`：数组输入扇入
 
-`Merge` 反过来——数组输入 `inps: Vec<Receiver>`，轮询 N 路、汇成一路。核心是 `futures_util::future::select_ok`：并发 race 一组 future，返回**第一个成功**的：
+`Merge` 反过来——数组输入 `inps: Vec<Receiver>`，轮询 N 路、汇成一路。核心是 `futures_util::future::select_ok`：并发 race 一组 future，返回**第一个成功**的。**本里程碑的简化示意**（端口用 `inps[]`）：
 
 ```rust,ignore
-#[inputs(inps[])]
+#[inputs(inps[])]                 // 简化示意语法；发货源码升级为 inps:[T0]，见 §2 与宏专题第 11 课
 #[outputs(out)]
 #[derive(Node, Actor, BuildFromPorts)]
 pub struct Merge {}
@@ -222,6 +230,12 @@ impl Merge {
 node_register!("Merge", Merge);
 ```
 
+发货源码里 `Merge` 的**真实定义**（`{{#include}}` 取自 `code/flow-rs/src/builtin.rs`）——端口声明升级为 `inps: [T0]` / `out: T0`，`exec` 与上面**逐字相同**：
+
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:merge}}
+```
+
 三个要害，逐个说清：
 
 - **为什么是 `select_ok` 而不是 `select_all`**——`select_all` 只按「谁先 ready」返回，**不区分 Ok/Err**。可这里 `recv_any` 返回 `Err` 意味着「某一路关闭了」，不是「有消息来了」。若用 `select_all`，一路先关闭会立刻被当成结果返回，把「关闭」误当「有消息」。`select_ok` 恰好相反：它**跳过先来的 Err**，等到某个 Ok，或者**全部 Err** 时才返回 `Err`——语义正好是「还有活着的上游就继续收，全关了才收工」。
@@ -232,22 +246,29 @@ node_register!("Merge", Merge);
 
 ## 7. 端到端：真正的 N 路
 
-`Bcast`：一条输入经 `bc` 复制给 `t1`/`t2` 两个 `Transform`，两条对外输出各收到全部三条消息的副本。`bc:out` 这个数组输出端口出现在**两条**内部连接上，装配期攒成 2 个 `Sender` 的组：
+`Bcast`：一条输入经 `bc` 复制给 `t1`/`t2` 两个 `Transform`，两条对外输出各收到全部三条消息的副本。`bc:out` 这个数组输出端口出现在**两条**内部连接上，装配期攒成 2 个 `Sender` 的组（下面是 `tests/array_ports_e2e.rs` 里的真实测试，含图配置常量 `BCAST_GRAPH`）：
 
-```rust,ignore
-connections = [
-    {cap=16, ports=["bc:out", "t1:inp"]},   // bc:out 数组端口，第 1 个 Sender
-    {cap=16, ports=["bc:out", "t2:inp"]},   // 同一个数组端口，第 2 个 Sender
-]
+```rust
+{{#include ../../../code/flow-rs/tests/array_ports_e2e.rs:bcast_graph}}
 ```
 
-`Merge`：两条对外输入 `in1`/`in2` 都接到 `mg:inps`（数组输入端口，两条**独立** channel），`mg` 轮询汇成一路，输出端收齐两路共 6 条。
+`Merge`：两条对外输入 `in1`/`in2` 都接到 `mg:inps`（数组输入端口，两条**独立** channel），`mg` 轮询汇成一路，输出端收齐两路共 6 条：
+
+```rust
+{{#include ../../../code/flow-rs/tests/array_ports_e2e.rs:merge_graph}}
+```
+
+另有两个沙箱 group-of-1 退化例（数组端口只接 1 路也成立）：
+
+```rust
+{{#include ../../../code/flow-rs/tests/array_ports_e2e.rs:sandbox_degenerate}}
+```
+
+四个测试（两图 + 两沙箱 group-of-1 退化例）全绿。上面三个 `{{#include}}` 块直接取自 `tests/array_ports_e2e.rs`，读者照抄即真实测试。
 
 > **一条真踩到的坑：不能 drain-到-close。** 最初这两个图测试用 `while let Ok(mut e) = o1.recv::<i32>().await { .. }` 想「收到 channel 关闭为止」，结果**死锁超时**。根因藏在 `MainGraph` 的停机语义里：`g.input(name)` 返回的是对外输入 `Sender` 的**克隆**，图**自己保留着原件**，直到 `g.stop()`（消费 `self`）或 `drop(g)` 才释放。于是调用方 `drop(tx)` 只丢了自己那份克隆，节点的输入端口**并未关闭**——关闭涟漪传不到 `o1`/`o2`，`while let Ok` 永远等不到关闭。而 `g.stop()` 又排在 drain 循环**之后**：drain 等 stop、stop 等 drain 结束，死锁。
 >
 > 修复对齐 Ch3.3/Ch4.1 已被验证的模式：**定量 `recv`**（`Bcast` 每路收恰好 3 条、`Merge` 收恰好 6 条排序比对）→ `drop` 克隆 → `g.stop()` → `handle.await`。教训：优雅停机的关闭涟漪，要么定量收、要么先 `stop` 再收，别指望在 `stop` 之前把对外输出「读到关闭」。
-
-四个测试（两图 + 两沙箱 group-of-1 退化例）全绿，连同全工程 **68 个测试** 一起通过。
 
 ## 8. 诚实的边界：这一章**没做**什么
 
@@ -259,9 +280,37 @@ connections = [
 如果业务要求所有目标都看到同一条消息，仍应输入 Bcast，由它克隆并逐路发送。
 能否接多个端口与是否复制消息是两个问题，不能混为一谈。
 
+## 9. 本章终点与复现
+
+**起点**：Ch4.1 结束时的工程（`Transform`/`NoopConsumer` 与内部连接 `connections` 已就绪）。
+
+**本章新增/改动的文件**：
+
+- `code/flow-derive/src/node.rs`——`PortSpec` 的数组解析、`#[inputs]`/`#[outputs]` 的 `Vec<_>` 字段注入、`close` 的 `.clear()` 分支、`NodeCtor` 升维成 `Vec<Vec<_>>`、并行的 `INPUT_ARRAY`/`OUTPUT_ARRAY` 表（本章 §2/§3 各代码块的来源）。
+- `code/flow-rs/src/builtin.rs`——`Bcast`（§5）、`Merge`（§6）两个内置节点。
+- `code/flow-rs/src/graph.rs`——`attach_sender`/`attach_receiver` 按 arity 分岔、空组处置（§4）。
+- `code/flow-rs/tests/array_ports_e2e.rs`——四个 e2e 测试（§7）。
+
+**验收命令**（照抄可跑，四项测试全绿）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test array_ports_e2e --locked
+```
+
+预期：
+
+```text
+test bcast_fans_out_to_two_downstreams ... ok
+test merge_fans_in_from_two_upstreams ... ok
+test sandbox_bcast_single_downstream ... ok
+test sandbox_merge_single_upstream ... ok
+```
+
+正文里 `Bcast`/`Merge` 节点定义与四个测试均由 `{{#include}}` 直接取自真实文件。§5/§6 另各留一段标注「简化示意」的 `name[]` 版本，与发货源码 `inp:T0`/`out:[T0]` 的差异及其原因见 §2 与宏专题第 11 课。
+
 ## 小结
 
-- **数组端口** `name[]` 是标量端口的超集：字段从 `Option<Sender>`/`Receiver` 升成 `Vec<Sender>`/`Vec<Receiver>`，`close` 从「置 `None`」升成「`.clear()`」。语法从简用裸空方括号（channel 字段未类型化，不需要原版的 `[T0]` 类型变量）。
+- **数组端口** `name[]` 是标量端口的超集：字段从 `Option<Sender>`/`Receiver` 升成 `Vec<Sender>`/`Vec<Receiver>`，`close` 从「置 `None`」升成「`.clear()`」。本里程碑先用裸空方括号 `name[]` 把地基夯实（channel 字段未类型化，`recv_any`/`send_any` 此刻用不到类型）；发货源码后来把它**补齐**成原版的 `inp:T0`/`out:[T0]`（模板编号是跨连接类型推导的钥匙），详见宏专题第 11 课——升级的只是端口语法与类型关联，`Bcast`/`Merge` 的收发算法一字不差。
 - **构造器升一维**：`Vec<Vec<_>>`，每个内层 Vec 是一个端口名的「组」。标量端口 = 恰 1 个的组（`remove(0).remove(0)`），数组端口 = 整组搬走（`remove(0)`）。并行的 `INPUT_ARRAY`/`OUTPUT_ARRAY` 让装配器在运行期也知道端口 arity。
 - **升维而非另起炉灶**：标量是 N=1 的退化，行为逐字节等价，故 64 个旧测试一字不改继续绿。
 - **扇出必须由节点做，扇入本可不要节点**：`Bcast` 用 `split_last` 克隆-分发（兑现 Ch1.4「广播是节点职责」）；`Merge` 用 `select_ok` 轮询独立多路，靠「跳过 Err、全 Err 才停」正确区分「消息」与「关闭」，靠 recv 的取消安全放心丢弃落选 future。

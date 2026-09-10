@@ -1,0 +1,10 @@
+[package]
+name = "ast-walk"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "visit-mut", "fold"] }
+quote = "1"

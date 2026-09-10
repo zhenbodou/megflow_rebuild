@@ -1,6 +1,6 @@
 # Ch0.2 开发环境与项目骨架
 
-这一章全程动手。跟着从头到尾走一遍，你的机器上就会长出**和本书 `code/`、`book/` 一模一样的骨架**：一个能 `cargo build` 的三 crate 工作区，加一本能 `mdbook serve` 预览的教材。文中每一条命令、每一份文件，都逐字来自本仓库真实提交的内容——照抄下来，`cargo build --workspace` 与 `mdbook build` 都会通过。
+本章从空目录建立三个空库和一份学习笔记。这里给出的是**本章阶段文件**，不是仓库最终文件。结束时能够构建，但还没有消息、节点或图功能。完整目标还有第四个 crate `flow-plugins`，在服务插件阶段加入。已经完成后续章节的读者不要用空骨架覆盖现有代码。
 
 <!-- toc -->
 
@@ -39,12 +39,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```bash
 $ rustc --version
-rustc 1.98.0 (88d9e12ae 2026-08-18)
+rustc 1.98.1 (...)
 $ cargo --version
-cargo 1.98.0 (797e8a9bc 2026-08-05)
+cargo 1.98.1 (...)
 ```
 
-只要主版本是 **1.98** 即可；括号里的哈希与日期因构建而异，不必一致。如果你装的是更早的版本，`rustup update stable` 升上来。
+本仓库验证使用 Rust 1.98.1。这里省略了工具实际输出的构建哈希和日期；1.98 中的 98 是次版本号。Rust 2021 则是语言 edition，不是编译器版本。
 
 ### 1.2 mdbook 三件套 + cargo-expand
 
@@ -109,7 +109,7 @@ cargo 的**特性解析器（feature resolver）**版本。resolver 2 修正了�
 
 ## 3. 一步步建引擎骨架（`code/`）
 
-现在把 `code/` 和里面的 7 个文件（4 个 `Cargo.toml` + 3 个 `src/lib.rs`）建出来。**下面每一份都是本仓库真实提交的内容，逐字照抄即可。**
+现在把 `code/` 和里面的 7 个文件（4 个 `Cargo.toml` + 3 个 `src/lib.rs`）建出来。下面给出本阶段的完整内容。路径相对新工程根目录，终端则按命令逐步进入子目录。
 
 先建根目录：
 
@@ -120,6 +120,7 @@ cd megflow-rebuild/code
 
 ### 3.1 工作区根 `code/Cargo.toml`（虚拟 manifest）
 
+<!-- course-file: code/Cargo.toml -->
 ```toml
 [workspace]
 resolver = "2"
@@ -153,6 +154,7 @@ mkdir -p flow-message/src
 
 `code/flow-message/Cargo.toml`：
 
+<!-- course-file: code/flow-message/Cargo.toml -->
 ```toml
 [package]
 name = "flow-message"
@@ -166,7 +168,8 @@ doctest = false   # 与原版一致：文档示例不作为 doctest 运行
 
 `code/flow-message/src/lib.rs`：
 
-```rust,ignore
+<!-- course-file: code/flow-message/src/lib.rs -->
+```rust
 //! flow-message —— MegFlow 消息层（重写版）。
 //!
 //! 目前为骨架。消息信封 `Envelope<M>` 与类型擦除将在 Part 1（Ch1.3）实现。
@@ -188,6 +191,7 @@ mkdir -p flow-derive/src
 
 `code/flow-derive/Cargo.toml`：
 
+<!-- course-file: code/flow-derive/Cargo.toml -->
 ```toml
 [package]
 name = "flow-derive"
@@ -202,7 +206,8 @@ doctest = false
 
 `code/flow-derive/src/lib.rs`：
 
-```rust,ignore
+<!-- course-file: code/flow-derive/src/lib.rs -->
+```rust
 //! flow-derive —— MegFlow 过程宏（重写版）。
 //!
 //! 目前为骨架。`#[inputs]`/`#[outputs]`/`#[derive(Node)]`/`#[methods]`/
@@ -224,6 +229,7 @@ mkdir -p flow-rs/src
 
 `code/flow-rs/Cargo.toml`：
 
+<!-- course-file: code/flow-rs/Cargo.toml -->
 ```toml
 [package]
 name = "flow-rs"
@@ -241,7 +247,8 @@ doctest = false
 
 `code/flow-rs/src/lib.rs`：
 
-```rust,ignore
+<!-- course-file: code/flow-rs/src/lib.rs -->
+```rust
 //! flow-rs —— MegFlow 引擎核心（重写版）。
 //!
 //! 目前为骨架。channel / node / registry / config / graph / rt 等模块将从
@@ -285,122 +292,59 @@ code/
 
 两个贯穿全书的选择，在这里交代清楚：
 
-- **为什么用 edition 2021（原版是 2018）**：edition 是 Rust 的「语言年份」，决定一批语法与默认行为。**原版引擎三个 crate 都写着 `edition = "2018"`**，而且是在每个 crate 里各写一遍；我们统一用 **2021**，并借 `[workspace.package]` 只写一处。2021 带来的实惠正好都用得上：闭包按字段**分别捕获**（写 async 闭包更省心）、数组直接 `IntoIterator`、prelude 默认引入 `TryFrom`/`TryInto`/`FromIterator`、以及 `resolver = "2"` 成为包的默认。用新 edition 是「实现更简、bug 更少」这个目标的一部分。
-- **为什么只用 crates.io（原版用 megvii 私有注册表）**：原版引擎仓里散布着 **22 处 `registry = "megvii"`** 的私有依赖（分布在 flow-rs / flow-message / flow-plugins / flow-cffi / flow-python 五个 crate），默认构建就卡在这批拉不到的私有 crate 上；而更上层——把引擎真正用起来的算法仓——还会链接闭源的 `pplcore-*` / `mpp` 全家桶（这两者不在引擎仓里，属引擎之上的视觉/硬件层；见 spec §6 边界与 Ch5.1）。私有注册表里的东西**别人拿不到、也编不了**（而 `pyo3` / `stackful` 这类只是**可选的公共 crate**，并非私有或闭源，本书重写因不做 Python/FFI 而用不到它们）。本书的重写**明确禁用**私有注册表与闭源依赖，心智模型里只出现 **crates.io 上的公共 crate**——任何人用一套 stock 工具链就能完整复现。§3.1 那行注释说的就是这件事。
+- **edition 2021**：统一本工程的语言规则。原版各 crate 的 edition 应分别读取 manifest，不能说全是 2018。闭包按字段捕获、数组的 IntoIterator 和 prelude 的变化将在使用时解释。
+- **依赖来源**：重构使用公开依赖和本地纯 Rust 等价实现。原版 manifest 中的私有注册表声明不证明 crates.io 上不存在同名包，更不证明同名包与私有版本等价；替换必须逐项验证调用点行为。
 
-## 4. 建 mdbook 教材骨架（`book/`）
+## 4. 建个人学习笔记（`book/`）
 
-回到工程根，把教材目录建出来。可以用 `mdbook init book` 生成初始脚手架，再把它生成的 `book.toml` 和 `src/SUMMARY.md` 换成下面的版本；也可以直接手建。这里给出**最终该长成的样子**（逐字照抄即可复现）：
+这里建立你自己的最小实验笔记，不复制整本教材。每个导航链接对应一份本章给出的文件，不依赖以后补写的页面。
 
 ```bash
-cd ..                      # 从 code/ 回到工程根 megflow-rebuild/
-mkdir -p book/src/part0
+cd ..                      # 从 code/ 回到新工程根目录
+mkdir -p book/src
 cd book
 ```
 
-### 4.1 `book/book.toml`
+### `book/book.toml` 完整内容
 
+<!-- course-file: book/book.toml -->
 ```toml
 [book]
-title = "从零用 Rust 重写 MegFlow —— 手把手学习型指南"
-authors = ["douzhenbo", "Claude"]
+title = "我的 MegFlow 实验笔记"
 language = "zh-CN"
 src = "src"
 
-[preprocessor.toc]
-command = "mdbook-toc"
-renderer = ["html"]
-
-[preprocessor.mermaid]
-command = "mdbook-mermaid"
-
 [output.html]
 default-theme = "light"
-preferred-dark-theme = "navy"
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
 ```
 
-逐块读：
+`src` 相对配置文件所在目录。此处没有预处理器和 JavaScript 资源依赖；教材本身的 Mermaid 图是另一套配置，不影响这份笔记。
 
-- `[book]`：书名、作者、语言（`zh-CN`）、源码目录（`src`）。
-- `[preprocessor.toc]`：启用 mdbook-toc，把页面里的 `<!-- toc -->` 展开成目录；`renderer = ["html"]` 限定它只对 html 输出生效。
-- `[preprocessor.mermaid]`：启用 mdbook-mermaid，让 ` ```mermaid ` 代码块变成图。
-- `[output.html]`：默认浅色主题、深色主题用 `navy`；`additional-js` 挂两个 js——**这两行不是手填的，是 §4.3 的 `mdbook-mermaid install` 自动加的**。
+### `book/src/SUMMARY.md` 完整内容
 
-### 4.2 `book/src/SUMMARY.md`（书的骨架与导航）
-
-`SUMMARY.md` 就是**整本书的结构**：mdbook 读它来决定有哪些页、什么顺序，并据此生成对应的 html。逐字照抄：
-
+<!-- course-file: book/src/SUMMARY.md -->
 ```markdown
 # 目录
 
-[前言](introduction.md)
-
-# 第 0 部分 · 全景与环境
-
-- [Ch0.1 什么是 dataflow / actor，MegFlow 全景](part0/ch01-panorama.md)
-- [Ch0.2 开发环境与项目骨架](part0/ch02-environment.md)
-- [Ch0.3 跑通真实 flow-rs，钉死验收标准](part0/ch03-reference.md)
-
-# 第 1 部分 · 消息与异步地基
-
-- [Ch1.1 Rust 复习：并发下的所有权、借用、生命周期 + 错误处理]()
-- [Ch1.2 泛型、trait、trait 对象 dyn、Any 与 downcast]()
-- [Ch1.3 实现 Envelope 消息信封与类型擦除消息层]()
-- [Ch1.4 async/await、Future、tokio 入门 → channel 封装]()
-
-# 第 2 部分 · 节点与过程宏
-
-- [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）]()
-- [Ch2.2 过程宏入门：proc-macro2 / syn / quote]()
-- [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏]()
-- [Ch2.4 node_register! 与 inventory 编译期注册表]()
-
-# 第 3 部分 · 图与运行时
-
-- [Ch3.1 serde / toml 与图 TOML schema → 配置解析层]()
-- [Ch3.2 Graph Builder：装配节点与 channel]()
-- [Ch3.3 tokio 调度：spawn actor、start/stop、优雅停机]()
-- [Ch3.4 端到端跑通 BinaryOp（大里程碑）+ Sandbox 测试框架]()
-
-# 第 4 部分 · 内置节点与高级特性
-
-- [Ch4.1 transform / noop / bcast 广播 + add_cvt_func]()
-- [Ch4.2 merge / demux / reorder（多路复用与重排序）]()
-- [Ch4.3 Resource 与 Context：共享模型 / 内存池]()
-- [Ch4.4 子图 subgraph、多图 graphs、动态子图]()
-
-# 第 5 部分 · 兼容 · 优化 · 收尾
-
-- [Ch5.1 对齐真实 API，跑真实算法仓风格的图 + pplcore 边界]()
-- [Ch5.2 优化与更少 bug：逐条对比原版]()
-- [Ch5.3 全景回顾 + 进阶指路]()
+- [工作区实验](workspace.md)
 ```
 
-读点：
+目录决定页面和顺序，链接相对 `src/` 解析。
 
-- `[前言](introduction.md)` 是**前置章（prefix chapter）**，排在编号章之前。
-- `# 第 X 部分 · …` 是**分组标题（part title）**，只分组、不成页。
-- `- [标题](路径.md)` 是**编号章节**；mdbook 会为每个有真实路径的条目生成一页。
-- **链接为空 `()` 的是「草稿章」**：mdbook 把它渲染成灰色、不可点的占位，`mdbook build` **不会**为它生成文件，因此也不会有死链。整本书的路线图先摆在这，Part 1–5 的正文随写随把 `()` 换成真实路径。
-- 我们这一章 `part0/ch02-environment.md` 就是上面一个**已经有真实路径**的条目。
+### `book/src/workspace.md` 完整内容
 
-再建另外三个已有真实链接、但内容随后补的页（本章只关心骨架能构建，正文由各自的 Task 写）：`src/introduction.md`、`src/part0/ch01-panorama.md`、`src/part0/ch03-reference.md`——加上你正在读的 `ch02-environment.md`，Part 0 的四个真实页就齐了。
+<!-- course-file: book/src/workspace.md -->
+```markdown
+# 工作区实验
 
-### 4.3 `mdbook-mermaid install`：让 mermaid 能渲染
+我建立了 flow-message、flow-derive、flow-rs 三个空库。
 
-在 `book/` 目录里跑一次：
+flow-rs 通过本地路径依赖另外两个库。
 
-```bash
-mdbook-mermaid install .
+构建成功只证明骨架正确，还没有实现消息传递。
 ```
 
-它做两件事：
-
-1. 把 `mermaid.min.js` 和 `mermaid-init.js` 两个文件**释放到 `book/` 目录**（与 `book.toml` 同级）；
-2. 自动往 `book.toml` 的 `[output.html]` 里**追加** `additional-js = ["mermaid.min.js", "mermaid-init.js"]`。
-
-这正解释了：为什么 §4.1 的 `book.toml` 里已经有那行 `additional-js`，为什么 `book/` 下会躺着那两个 `.js`。**跳过这一步，` ```mermaid ` 块就渲染不出图**（详见 §6.2）。
+以后每次实验可以新增笔记文件，再向目录添加链接。mdBook 构建验证文档结构，不验证文中描述的框架行为。
 
 ## 5. 验证：两条命令跑通全部
 
@@ -435,7 +379,7 @@ mdbook serve --open
 mdbook build          # 产物在 book/book/ 下
 ```
 
-至此，`cargo build --workspace` 与 `mdbook build` 都通过——你手上的骨架和本书 `code/`、`book/` 逐字一致了。
+至此，Rust 空骨架与个人学习笔记都应构建通过。它们是本阶段产物，不能与参考仓库的后续实现混为一谈。
 
 ## 6. 常见坑
 
@@ -449,19 +393,9 @@ warning: both '/home/you/.cargo/config' and '/home/you/.cargo/config.toml' exist
 
 原因：cargo 的全局配置早年叫 `~/.cargo/config`（无扩展名），新版改用 `~/.cargo/config.toml`。当**两者都在**时，出于向后兼容，cargo 会**用那个老的、无扩展名的 `config`**（如 warning 末尾 `Using .../config` 所示），并把 `config.toml` **忽略掉**。这就是坑：你以为自己在改 `config.toml`，实际全没生效。
 
-修复——只留一个。把无扩展名的那个删掉或改名，让 `config.toml` 生效：
+先比较并备份两份文件，按照 warning 确认实际使用哪份，再合并需要的设置。不要为本教程直接删除已有的代理、源替换或公司注册表配置。
 
-```bash
-# 情况 A：还没有 config.toml，直接把老文件改名过去
-mv ~/.cargo/config ~/.cargo/config.toml
-
-# 情况 B：两个都有内容，手动把需要的合并进 config.toml 后，删掉老的
-rm ~/.cargo/config
-```
-
-这只是环境遗留、不影响构建结果，但会误导你，值得清掉。
-
-### 6.2 mermaid 图不渲染（显示成源码或代码块）
+### 6.2 构建本教材时：mermaid 图不渲染（显示成源码或代码块）
 
 症状：页面里 ` ```mermaid ` 块没变成图，而是显示成一段文字或普通代码块。十有八九是**忘了跑 `mdbook-mermaid install`**——那两个 `.js` 没被注入，浏览器端就没有渲染 mermaid 的脚本。修复：
 
@@ -475,6 +409,12 @@ mdbook build
 
 ## 小结
 
-这一章你把 §2 的工作区心智模型落成了 §3 的 7 个真实文件，又建起 §4 的 mdbook 骨架，并在 §5 用两条命令验收。现在你有一个**与本书逐字一致、`cargo build --workspace` 与 `mdbook build` 双双通过**的骨架。
+这一章你把工作区概念落实为七个完整文件，并建立了个人学习笔记。构建成功证明文件布局和依赖关系正确，不代表实现了消息处理。
 
-下一章 **Ch0.3**：把**真实的** flow-rs 跑起来，用它的行为**钉死本书的验收标准**——之后每一章的「绿」，都对着这根基准线。
+下一章 **Ch0.3** 阅读固定版本的原版源码，建立行为验收标准；该章不会假设原版私有依赖已能在本机构建。
+
+## 独立复现与排错实验
+
+教材仓库根目录运行 `python3 scripts/check_environment_course.py`，会从本章的十个完整文件代码块提取内容到新临时目录，离线构建 Rust 工作区并构建笔记；不会复制后续源码。这条维护命令不要求你在手写工程中安装教材的脚本。
+
+故意把 flow-rs 的消息依赖路径改为 `../missing-message`，构建应在读取依赖 manifest 时失败；恢复后应成功。再把笔记目录链接改为 `missing.md`，检查书构建的诊断并恢复。最后不看答案说明：为什么 path 依赖相对声明它的 manifest，而命令中的路径相对终端当前目录？为什么只有库的工作区不能直接用 cargo run 启动？

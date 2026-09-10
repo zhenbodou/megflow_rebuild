@@ -125,43 +125,18 @@ for snd in &senders {
 
 这段插在「对外输入/输出」与「逐节点构造」之间：等它跑完，`node_ins`/`node_outs` 里既有对外端口带来的 channel 端、也有内部连接带来的，后面**同一套**「按注册表端口名表排成位置 Vec → 造节点」的逻辑照单全收，一行不用改。
 
-新增的两个错误变体 `BadConnection` / `PortAlreadyConnected` 都在 `build()` 当场抛出——延续 Part 3 的「**校验前移到 build()**」：接线错误在建图那一刻暴露，而非等节点跑起来才诡异地收不到数据。三条构建期测试钉死它们：
+新增的两个错误变体 `BadConnection` / `PortAlreadyConnected` 都在 `build()` 当场抛出——延续 Part 3 的「**校验前移到 build()**」：接线错误在建图那一刻暴露，而非等节点跑起来才诡异地收不到数据。三条构建期测试钉死它们（真实源码取自 `tests/connections_e2e.rs`——注意它们**不是** `#[tokio::test]`，在 `build()` 就返回 `Err`，根本跑不到运行时）：
 
-```rust,ignore
-// 两个输入端口挂一条连接 → 2 接收端 0 发送端 → BadConnection
-connections = [{cap=16, ports=["add1:a", "add2:a"]}]
-// 全是输出端口 → 0 接收端 → BadConnection
-connections = [{cap=16, ports=["add1:c", "add2:c"]}]
-// add2:a 既被对外输入 x 接了、又被内部连接接 → PortAlreadyConnected
-inputs = [{name="x", cap=16, ports=["add2:a"]}]
-connections = [{cap=16, ports=["add1:c", "add2:a"]}]
+```rust
+{{#include ../../../code/flow-rs/tests/connections_e2e.rs:build_errors}}
 ```
 
 ## 4. 端到端：两个 BinaryOp 串成 `(1 + 2) + 10 == 13`
 
-不引入任何新节点，纯用已发货的 `BinaryOp` 串链，专验「内部连接」这一件事成立。`add1` 算 `a1 + b1`，结果经内部连接喂给 `add2` 的 `a`，`add2` 再加上外部 `b2`：
+不引入任何新节点，纯用已发货的 `BinaryOp` 串链，专验「内部连接」这一件事成立。`add1` 算 `a1 + b1`，结果经内部连接喂给 `add2` 的 `a`，`add2` 再加上外部 `b2`（下面是 `tests/connections_e2e.rs` 里的真实测试，图配置常量 `CHAIN_GRAPH` 就是 §2 那段 TOML）：
 
-```rust,ignore
-#[tokio::test]
-async fn internal_connection_chains_two_nodes() {
-    let mut g = Builder::default().template(CHAIN_GRAPH).build().unwrap();
-    let handle = g.start();
-
-    let a1 = g.input("a1").unwrap();
-    let b1 = g.input("b1").unwrap();
-    let b2 = g.input("b2").unwrap();
-    let mut out = g.take_output("out").unwrap();
-
-    a1.send(Envelope::new(1i32)).await.unwrap();
-    b1.send(Envelope::new(2i32)).await.unwrap();   // add1: 1 + 2 = 3
-    b2.send(Envelope::new(10i32)).await.unwrap();  // add2: 3 + 10 = 13
-
-    assert_eq!(out.recv::<i32>().await.unwrap().unpack(), 13);
-
-    drop(a1); drop(b1); drop(b2);
-    g.stop();
-    handle.await.unwrap().unwrap();
-}
+```rust
+{{#include ../../../code/flow-rs/tests/connections_e2e.rs:chain}}
 ```
 
 `3` 从没经过任何对外端口——它在图**内部**从 `add1` 流到了 `add2`。这正是流水线的最小雏形。
@@ -170,25 +145,10 @@ async fn internal_connection_chains_two_nodes() {
 
 `BinaryOp` 里 `self.a.recv::<i32>()` 把消息类型**钉死在节点里**——它只会处理 `i32`。但有一类节点根本不关心载荷是什么，只管**搬运**：原样透传、或收下即弃。它们该走 Ch1.4 那对**未类型化**的 API——`recv_any`/`send_any`，进出的是**已封箱**的 `SealedEnvelope`，全程不拆封。
 
-**`Transform`**：1 入 1 出，把收到的封箱消息原样转发。
+**`Transform`**：1 入 1 出，把收到的封箱消息原样转发（真实源码取自 `code/flow-rs/src/builtin.rs`）：
 
-```rust,ignore
-#[inputs(inp)]
-#[outputs(out)]
-#[derive(Node, Actor, BuildFromPorts)]
-pub struct Transform {}
-
-#[methods]
-impl Transform {
-    async fn exec(&mut self) -> Result<()> {
-        let msg = self.inp.recv_any().await?;      // 收一条封箱消息，不拆封
-        if let Some(out) = self.out.as_ref() {
-            out.send_any(msg).await?;              // 原样转发
-        }
-        Ok(())
-    }
-}
-node_register!("Transform", Transform);
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:transform}}
 ```
 
 因为它不 `downcast`，同一个 `Transform` 搬 `i32` 和搬 `String` 一样自然——两个测试分别喂整数流和字符串流，都原样吐出：
@@ -202,22 +162,10 @@ sb.add_items("inp", vec!["a".to_string(), "bc".to_string()]).add_check("out", mo
 
 `Transform` 是流水线里最朴素的一块积木：占位、解耦、当调试探针，都用得上。它兑现了 Ch1.3「封箱 + 类型擦除」那层设计——正因为消息能被封进不透明的信封，才可能有「不看类型也能搬」的节点。
 
-**`NoopConsumer`**：只有输入、没有输出的**汇（sink）**，把消息吸收丢弃：
+**`NoopConsumer`**：只有输入、没有输出的**汇（sink）**，把消息吸收丢弃（真实源码取自 `code/flow-rs/src/builtin.rs`）：
 
-```rust,ignore
-#[inputs(inp)]
-#[outputs]
-#[derive(Node, Actor, BuildFromPorts)]
-pub struct NoopConsumer {}
-
-#[methods]
-impl NoopConsumer {
-    async fn exec(&mut self) -> Result<()> {
-        self.inp.recv_any().await?;   // 收下即弃
-        Ok(())
-    }
-}
-node_register!("NoopConsumer", NoopConsumer);
+```rust
+{{#include ../../../code/flow-rs/src/builtin.rs:noop_consumer}}
 ```
 
 它用来**终止**一条数据流分支：下游不再需要结果，但仍得有人把消息取走，好让上游的关闭涟漪正常传导（没人收，channel 满了就卡住）。注意它合法地**没有** `#[outputs]`——零输出节点，`close()` 无端口可撤，`recv_any` 一旦 `ChannelClosed` 即收工。
@@ -246,15 +194,14 @@ node_register!("NoopConsumer", NoopConsumer);
 
 `shared_internal_connection_distributes_without_broadcasting` 建立 source → left/right
 竞争接收 → 共同输出的图，所有通道容量为 1。生产和消费并发，输入 200 个唯一序号，
-输出排序后必须恰好等于完整输入集合；然后验证输出关闭和图任务退出。
+输出排序后必须恰好等于完整输入集合；然后验证输出关闭和图任务退出（真实源码取自
+`tests/connections_e2e.rs`）：
 
-```bash
-cargo test --manifest-path code/Cargo.toml -p flow-rs --test connections_e2e --locked
+```rust
+{{#include ../../../code/flow-rs/tests/connections_e2e.rs:shared_distribute}}
 ```
 
 这证明静态内部连接的普通消息竞争接收，不证明 flush 轮次、共享子图实例或动态寻址。
-对外输入多目标另有 graph_input_multiple_targets_share_one_queue 测试，验证 100 条输入只产生 100 条汇聚输出。
-
 
 ### 对外输入连接到多个目标
 
@@ -265,3 +212,38 @@ build 时返回 BadConnection。
 
 例如 `ports=["left:inp", "right:inp"]` 表示竞争分配。两路共同输出之后，消息总数
 应等于输入总数；如果需要两路各得到全部输入，请使用 Bcast。具体分配比例不保证。
+`graph_input_multiple_targets_share_one_queue` 验证 100 条输入只产生 100 条汇聚输出：
+
+```rust
+{{#include ../../../code/flow-rs/tests/connections_e2e.rs:multi_target}}
+```
+
+## 本章终点与复现
+
+**起点**：Ch3.4 结束时的工程（第一台真能跑的引擎，`BinaryOp` + `Sandbox`）。
+
+**本章新增/改动的文件**：
+
+- `code/flow-rs/src/config.rs`——`ConnConfig` + `GraphConfig` 加 `connections` 字段（§2）。
+- `code/flow-rs/src/graph.rs`——内部连接的方向推断、形态校验、建 channel 与接线（§3）。
+- `code/flow-rs/src/builtin.rs`——`Transform`、`NoopConsumer` 两个类型无关节点（§5）。
+- `code/flow-rs/tests/connections_e2e.rs`——串链 e2e + 三条构建期错误 + 两条竞争分配测试。
+
+**验收命令**（照抄可跑）：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test connections_e2e --locked
+```
+
+预期：
+
+```text
+test internal_connection_chains_two_nodes ... ok
+test connection_with_no_sender_is_rejected ... ok
+test connection_with_no_receiver_is_rejected ... ok
+test port_wired_twice_is_rejected ... ok
+test shared_internal_connection_distributes_without_broadcasting ... ok
+test graph_input_multiple_targets_share_one_queue ... ok
+```
+
+正文里 `Transform`/`NoopConsumer` 节点定义与全部测试均由 `{{#include}}` 直接取自真实文件。

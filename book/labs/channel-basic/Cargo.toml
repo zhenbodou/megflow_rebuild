@@ -1,0 +1,12 @@
+[package]
+name = "channel-basic"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+exclude = ["message"]
+
+[dependencies]
+flow-message = { path = "message" }
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+thiserror = "2"

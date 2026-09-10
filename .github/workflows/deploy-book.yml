@@ -51,6 +51,12 @@ jobs:
       - name: Validate standalone message chapter
         run: python3 scripts/check_message_course.py
 
+      - name: Validate environment chapter from printed files
+        run: python3 scripts/check_environment_course.py
+
+      - name: Validate introductory channel chapter
+        run: python3 scripts/check_basic_channel_course.py
+
       - name: Validate standalone async workshop
         run: python3 scripts/check_async_course.py
 
@@ -59,6 +65,15 @@ jobs:
 
       - name: Validate standalone config workshop
         run: python3 scripts/check_config_course.py
+
+      - name: Validate introductory configuration chapter
+        run: python3 scripts/check_basic_config_course.py
+
+      - name: Validate registry lessons without the runtime
+        run: python3 scripts/check_registry_course.py
+
+      - name: Validate standalone broker chapter
+        run: python3 scripts/check_broker_course.py
 
       - name: Validate runnable macro course and checkpoints
         run: python3 scripts/check_macro_course.py
