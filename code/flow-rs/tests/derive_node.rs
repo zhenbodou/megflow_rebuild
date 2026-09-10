@@ -18,6 +18,7 @@ use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
 use flow_rs::node::{Actor, Node};
 
+// ANCHOR: doubler
 #[inputs(inp)]
 #[outputs(out)]
 #[derive(Node, Actor)]
@@ -35,7 +36,9 @@ impl Doubler {
         Ok(())
     }
 }
+// ANCHOR_END: doubler
 
+// ANCHOR: doubler_test
 #[tokio::test]
 async fn macro_doubler_pipes_and_shuts_down() {
     let (in_tx, in_rx) = channel(8);
@@ -80,6 +83,28 @@ async fn macro_doubler_runs_behind_boxed_dyn_actor() {
     drop(in_tx);
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: doubler_test
+
+// ANCHOR: keeps_state
+struct HistorySender;
+
+// 业务类型恰好含 Sender，不应被 Node::close 当成输出端口关闭。
+#[derive(Node)]
+struct KeepsBusinessState {
+    history: Option<HistorySender>,
+    input_closed: bool,
+}
+
+#[test]
+fn node_close_does_not_erase_business_type_containing_sender() {
+    let mut node = KeepsBusinessState {
+        history: Some(HistorySender),
+        input_closed: false,
+    };
+    node.close();
+    assert!(node.history.is_some());
+}
+// ANCHOR_END: keeps_state
 
 // 原版 actor.rs 将 exec 循环放进内层 async，确保业务错误也经过 finalize。
 #[inputs]
@@ -130,23 +155,4 @@ async fn actor_error_closes_outputs_and_finalizes_once() {
     })
     .await
     .expect("错误路径必须收尾并返回，不能挂起");
-}
-
-struct HistorySender;
-
-// 业务类型恰好含 Sender，不应被 Node::close 当成输出端口关闭。
-#[derive(Node)]
-struct KeepsBusinessState {
-    history: Option<HistorySender>,
-    input_closed: bool,
-}
-
-#[test]
-fn node_close_does_not_erase_business_type_containing_sender() {
-    let mut node = KeepsBusinessState {
-        history: Some(HistorySender),
-        input_closed: false,
-    };
-    node.close();
-    assert!(node.history.is_some());
 }

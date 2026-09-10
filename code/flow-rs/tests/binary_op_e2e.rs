@@ -34,6 +34,7 @@ inputs = [
 outputs = [{name="c", cap=16, ports=["add:c"]}]
 "#;
 
+// ANCHOR: graph_path
 #[tokio::test]
 async fn binary_op_end_to_end_via_graph() {
     // 完整链路：配置解析（Ch3.1）→ 装配校验（Ch3.2）→ 调度（Ch3.3）→ 内置 BinaryOp（Ch3.4）。
@@ -58,7 +59,9 @@ async fn binary_op_end_to_end_via_graph() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: graph_path
 
+// ANCHOR: sandbox_path
 #[tokio::test]
 async fn sandbox_runs_single_binary_op() {
     // Sandbox：不写 TOML，直接按类型名建单节点，喂数、收数、跑完。
@@ -74,7 +77,9 @@ async fn sandbox_runs_single_binary_op() {
 
     assert_eq!(*collected.lock().unwrap(), vec![3]); // 1 + 2 == 3
 }
+// ANCHOR_END: sandbox_path
 
+// ANCHOR: error_path
 #[tokio::test]
 async fn sandbox_surfaces_node_error() {
     // op="%" 是未知运算符：节点 exec 返回 Err(Arg)，该错误经节点任务收尾一路抬到
@@ -86,7 +91,9 @@ async fn sandbox_surfaces_node_error() {
     let result: Result<()> = sb.start().await;
     assert!(matches!(result, Err(Error::Arg { .. })));
 }
+// ANCHOR_END: error_path
 
+// ANCHOR: metadata_test
 // 原版 Getting started 的四种运算都要验证；元信息必须来自左输入。
 #[tokio::test]
 async fn all_operations_preserve_left_envelope_metadata() {
@@ -126,3 +133,4 @@ async fn all_operations_preserve_left_envelope_metadata() {
     .await
     .expect("图应在五秒内完成四种运算并退出");
 }
+// ANCHOR_END: metadata_test

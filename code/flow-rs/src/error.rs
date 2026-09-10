@@ -9,6 +9,7 @@
 
 use thiserror::Error;
 
+// ANCHOR: error_enum
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("template type inference failed")]
@@ -99,6 +100,7 @@ pub enum Error {
     #[error("subgraph reference cycle through graph {0:?}")]
     SubgraphCycle(String),
 }
+// ANCHOR_END: error_enum
 
 /// 引擎统一的 `Result` 别名。/ the engine's `Result` alias.
 pub type Result<T> = std::result::Result<T, Error>;

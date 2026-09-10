@@ -493,6 +493,7 @@ pub fn expand_derive_actor(input: &DeriveInput) -> TokenStream2 {
 ///    会调用它们）。
 ///
 /// 假设 `exec` 的签名是 `async fn exec(&mut self) -> Result<()>`（本章 worker 节点约定）。
+// ANCHOR: expand_methods
 pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
     let mut has_init = false;
     let mut has_final = false;
@@ -544,6 +545,7 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
     item.items = new_items;
     quote! { #item }
 }
+// ANCHOR_END: expand_methods
 
 // ── Ch2.4：编译期注册表（`#[derive(BuildFromPorts)]` + `node_register!`）──
 
@@ -736,6 +738,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
 }
 
 /// `node_register!("Name", Type)` 的参数：注册名（字符串字面量）+ 节点类型路径。
+// ANCHOR: node_register_args
 pub struct NodeRegisterArgs {
     /// 注册到表里的类型名字符串（TOML 里按它引用节点）。
     pub name: LitStr,
@@ -751,6 +754,7 @@ impl Parse for NodeRegisterArgs {
         Ok(NodeRegisterArgs { name, ty })
     }
 }
+// ANCHOR_END: node_register_args
 
 /// 函数式宏 `node_register!("Name", Type)`：在编译期提交一条注册。
 ///
@@ -865,6 +869,17 @@ mod tests {
         assert!(expand_build_from_ports(&input)
             .to_string()
             .contains("compile_error"));
+    }
+
+    #[test]
+    fn list_grammar_accepts_one_type_and_rejects_lengths_or_leftovers() {
+        for syntax in ["out:[]", "out:[u32]", "out:[T0]", "out:[Result<u32, String>]"] {
+            let port: PortSpec = parse_str(syntax).unwrap();
+            assert!(port.array && !port.dict);
+        }
+        for syntax in ["out:[u32; 4]", "out:[u32, String]", "out:[u32] trailing"] {
+            assert!(parse_str::<PortSpec>(syntax).is_err(), "{syntax}");
+        }
     }
 
     #[test]

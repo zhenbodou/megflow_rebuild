@@ -5,7 +5,9 @@ use std::{
     sync::{LazyLock, RwLock},
 };
 
+// ANCHOR: cvt_f_type
 pub type CvtF = fn(SealedEnvelope) -> SealedEnvelope;
+// ANCHOR_END: cvt_f_type
 /// 属性宏提交的静态登记。用函数取得 TypeId，初始化时才调用。
 pub struct ConversionRegistration {
     pub from: fn() -> MsgTypeId,

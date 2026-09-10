@@ -21,6 +21,7 @@ use flow_rs::builtin::Counter;
 use flow_rs::error::Error;
 use flow_rs::graph::Builder;
 
+// ANCHOR: e2e
 /// 可复用子图 `Branch`（`Transform` 透传 → `Tally` 计数转发）被主图 `top` 实例化两份。
 /// 主图声明**一个** `Counter`，两份子图里的 `Tally` 都写 `res="counter"` 借它——于是它们
 /// bump 的是同一个计数器。子图引用 = 主图节点 `b1`/`b2` 的 `ty="Branch"` 恰好是图名。
@@ -138,3 +139,4 @@ fn subgraph_cycle_is_rejected() {
         "互相引用的子图应报 SubgraphCycle，实际：{err:?}"
     );
 }
+// ANCHOR_END: e2e

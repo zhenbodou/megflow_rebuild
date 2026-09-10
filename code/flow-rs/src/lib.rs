@@ -15,6 +15,7 @@
 // resolve inside this crate too (see `builtin`).
 extern crate self as flow_rs;
 
+pub mod broker;
 pub mod builtin;
 pub mod channel;
 pub mod config;

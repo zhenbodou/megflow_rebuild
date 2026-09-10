@@ -23,6 +23,7 @@ use flow_rs::graph::Builder;
 use flow_rs::sandbox::Sandbox;
 use std::sync::{Arc, Mutex};
 
+// ANCHOR: bcast_graph
 /// 广播扇出：`in → Bcast:inp`，`Bcast:out`（数组）经两条连接分别接到 `t1`/`t2`，
 /// 两个 Transform 各自转发到对外输出 `o1`/`o2`。`Bcast:out` 这个数组输出端口出现在两条
 /// 连接上，装配期攒成 2 个 Sender 的组——广播时对两路各发一份副本。
@@ -82,7 +83,9 @@ async fn bcast_fans_out_to_two_downstreams() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: bcast_graph
 
+// ANCHOR: merge_graph
 /// 汇聚扇入：两条对外输入 `in1`/`in2` 都接到 `Merge:inps`（数组输入端口，两条独立 channel），
 /// `Merge:out` 接对外输出 `out`。Merge 轮询两路、汇成一路。
 const MERGE_GRAPH: &str = r#"
@@ -132,7 +135,9 @@ async fn merge_fans_in_from_two_upstreams() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: merge_graph
 
+// ANCHOR: sandbox_degenerate
 /// 沙箱 group-of-1：Bcast 只接一个下游（数组输出退化成 1 路的组）也能原样广播。
 #[tokio::test]
 async fn sandbox_bcast_single_downstream() {
@@ -156,3 +161,4 @@ async fn sandbox_merge_single_upstream() {
     sb.start().await.unwrap();
     assert_eq!(*out.lock().unwrap(), vec![7, 8, 9]);
 }
+// ANCHOR_END: sandbox_degenerate

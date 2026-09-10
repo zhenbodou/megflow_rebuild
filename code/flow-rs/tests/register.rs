@@ -19,6 +19,7 @@ use flow_rs::error::{Error, Result};
 use flow_rs::node::{Actor, Node};
 use flow_rs::registry::{find, registrations, BuildFromPorts};
 
+// ANCHOR: node_def
 #[inputs(inp)]
 #[outputs(out)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -37,7 +38,9 @@ impl Doubler {
 
 // 编译期把 Doubler 登记进全局表。`node_register!` 生成 `flow_rs::inventory::submit!`。
 node_register!("Doubler", Doubler);
+// ANCHOR_END: node_def
 
+// ANCHOR: lookup
 #[test]
 fn doubler_is_registered() {
     // link 期汇总的表里应能按名字查到 Doubler。
@@ -77,3 +80,4 @@ async fn build_via_registry_and_run() {
     assert_eq!(got, vec![2, 4, 6]);
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: lookup

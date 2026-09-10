@@ -1,6 +1,7 @@
 use flow_rs::channel::{channel, channel_with_type, ReceiverT, SenderT, TypeInfo};
 use flow_rs::config::interlayer::{MsgType, MsgTypeId};
 
+// ANCHOR: wrapper_test
 #[test]
 fn wrapper_type_does_not_relabel_channel() {
     for capacity in [0, 1] {
@@ -15,6 +16,7 @@ fn wrapper_type_does_not_relabel_channel() {
         assert_eq!(receiver.clone().chan_tid(), MsgTypeId::of::<String>());
     }
 }
+// ANCHOR_END: wrapper_test
 
 #[test]
 fn unconnected_and_untyped_channels_default_to_any() {

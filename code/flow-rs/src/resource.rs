@@ -42,7 +42,9 @@ use std::sync::Arc;
 /// - `Send + Sync`——能安全地在（跑在不同 tokio 任务里的）节点间共享。
 ///
 /// A type-erased, shared resource handle.
+// ANCHOR: any_resource
 pub type AnyResource = Arc<dyn Any + Send + Sync>;
+// ANCHOR_END: any_resource
 
 /// 把类型擦除的 [`AnyResource`] 还原成具体的 `Arc<T>`；类型不符则返回 `None`。
 ///
@@ -53,9 +55,11 @@ pub type AnyResource = Arc<dyn Any + Send + Sync>;
 /// 分支丢掉，只留 `Option`。
 ///
 /// Downcast a type-erased resource back to `Arc<T>`, or `None` on type mismatch.
+// ANCHOR: downcast_arc
 pub fn downcast_arc<T: Any + Send + Sync>(r: AnyResource) -> Option<Arc<T>> {
     r.downcast::<T>().ok()
 }
+// ANCHOR_END: downcast_arc
 
 /// 「可被引擎构造的资源」trait——由 `resource_register!` 注册的资源类型实现它。
 ///
@@ -65,6 +69,7 @@ pub fn downcast_arc<T: Any + Send + Sync>(r: AnyResource) -> Option<Arc<T>> {
 /// 指针，从不需要 `dyn BuildResource`。
 ///
 /// A resource the engine can construct from config args (dual to `BuildFromPorts`).
+// ANCHOR: build_resource
 pub trait BuildResource: Any + Send + Sync {
     /// 从配置参数构造资源实例；参数不对 → `Err`。
     /// Construct from config args; bad args → `Err`.
@@ -72,6 +77,7 @@ pub trait BuildResource: Any + Send + Sync {
     where
         Self: Sized;
 }
+// ANCHOR_END: build_resource
 
 /// 把 `<T as BuildResource>::build` 包成一个**类型擦除**的构造器——`resource_register!` 生成的
 /// 注册条目 `ctor` 就指向它（对偶于 `NodeRegistration::ctor` 指向 `BuildFromPorts::build`）。
@@ -85,11 +91,13 @@ pub trait BuildResource: Any + Send + Sync {
 ///
 /// Wrap `T::build` into a type-erased constructor. The explicit `let any: AnyResource`
 /// is the coercion site: `Ok(Arc::new(..))` won't unsize `Arc<T>` → `Arc<dyn Any>`.
+// ANCHOR: build_arc
 pub fn build_arc<T: BuildResource>(args: &Args) -> Result<AnyResource> {
     let r: Arc<T> = Arc::new(T::build(args)?);
     let any: AnyResource = r; // 显式强转点：Arc<T> → Arc<dyn Any + Send + Sync>
     Ok(any)
 }
+// ANCHOR_END: build_arc
 
 /// 一张**共享的**「资源名 → 资源」表，随 [`crate::context::Context`] 一起交给每个节点。
 ///
@@ -99,6 +107,7 @@ pub fn build_arc<T: BuildResource>(args: &Args) -> Result<AnyResource> {
 /// 朴素 `HashMap` 而非并发容器——没有写竞争，读多个 `Arc` 无需加锁。
 ///
 /// A shared `name → resource` table, cloned (cheaply, via `Arc`) into each node's `Context`.
+// ANCHOR: collection
 #[derive(Clone, Default)]
 pub struct ResourceCollection {
     inner: Arc<HashMap<String, AnyResource>>,
@@ -117,6 +126,7 @@ impl ResourceCollection {
         downcast_arc::<T>(self.inner.get(name)?.clone())
     }
 }
+// ANCHOR_END: collection
 
 // ── 测试：类型擦除往返、错类型落 None、集合按名取（红→绿）──
 #[cfg(test)]

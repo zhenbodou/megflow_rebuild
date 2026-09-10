@@ -25,6 +25,7 @@
 //! resource / graph names into scope, mirroring the original MegFlow's `prelude`
 //! (but our `Result` is our own, so no `use anyhow::Result;` is needed alongside).
 
+// ANCHOR: prelude_facade
 // ── 消息 ──────────────────────────────────────────────────────────────────
 pub use crate::envelope::{
     str2addr, AnyEnvelope, DummyEnvelope, Envelope, EnvelopeInfo, SealedEnvelope,
@@ -52,3 +53,4 @@ pub use crate::sandbox::Sandbox;
 // 原版公开的端口/消息类型描述与单个 TOML 参数值。
 pub use crate::config::interlayer::{MsgType, MsgTypeId, PortInfo, PortType};
 pub type Arg = toml::value::Value;
+// ANCHOR_END: prelude_facade

@@ -23,6 +23,7 @@ use flow_rs::registry::BuildFromPorts;
 /// 一个「二元运算」测试节点：两个输入端口 `a`/`b`、一个输出 `c`、一个自有参数 `op`。
 /// 相对 Ch2.4 的 `Doubler`（1 入 1 出、无参），它把 Ch3.2 的三件新事一次性覆盖：
 /// **多输入端口**（命名接线必须对号入座）、**输出端口**、**从 `args` 取参数**。
+// ANCHOR: node_def
 #[inputs(a, b)]
 #[outputs(c)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -30,6 +31,7 @@ struct TestBinaryOp {
     /// 运算符，由 TOML 里的 `op="+"` 经 `args` 注入（`BuildFromPorts::build` 反序列化）。
     op: String,
 }
+// ANCHOR_END: node_def
 
 #[methods]
 impl TestBinaryOp {
@@ -72,6 +74,7 @@ inputs = [
 outputs = [{name="c", cap=8, ports=["add:c"]}]
 "#;
 
+// ANCHOR: e2e
 #[tokio::test]
 async fn builds_and_runs_binary_op() {
     // 装配：TOML → MainGraph（find 构造器、命名接线、注入 op="+"）。
@@ -109,7 +112,9 @@ async fn builds_and_runs_binary_op() {
         h.await.unwrap().unwrap();
     }
 }
+// ANCHOR_END: e2e
 
+// ANCHOR: err_checks
 #[test]
 fn missing_main_graph_errors() {
     // main 指向一张不存在的图 → 建图当场报错（解析层只发现，build 才报错）。
@@ -171,6 +176,7 @@ outputs = [{name="c", cap=8, ports=["add:c"]}]
     let err = Builder::default().template(toml).build().unwrap_err();
     assert!(matches!(err, Error::UnknownPort { .. }));
 }
+// ANCHOR_END: err_checks
 
 #[tokio::test]
 async fn unconnected_input_builds_and_closes_without_data() {

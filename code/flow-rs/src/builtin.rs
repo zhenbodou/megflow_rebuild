@@ -41,6 +41,7 @@ use std::sync::Arc;
 /// 而非运算本身的丰富度（更多算子、浮点、多操作数留给读者练习）。
 ///
 /// A tiny built-in: reads one `i32` from each of `a`/`b`, applies `op`, sends to `c`.
+// ANCHOR: binary_op
 #[inputs(a, b)]
 #[outputs(c)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -78,6 +79,7 @@ impl BinaryOp {
 }
 
 node_register!("BinaryOp", BinaryOp);
+// ANCHOR_END: binary_op
 
 /// 类型无关直通节点：从输入端口 `inp` 收一条消息，原样转发到输出端口 `out`。
 ///
@@ -88,6 +90,7 @@ node_register!("BinaryOp", BinaryOp);
 /// 上下游决定、与它无关。这正是 Ch1.3「封箱 + downcast」那层设计的兑现场景。
 ///
 /// A type-agnostic passthrough: `recv_any` one sealed envelope, `send_any` it on unchanged.
+// ANCHOR: transform
 #[inputs(inp)]
 #[outputs(out)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -108,6 +111,7 @@ impl Transform {
 }
 
 node_register!("Transform", Transform);
+// ANCHOR_END: transform
 
 /// 汇（sink）节点：只有输入端口 `inp`、没有输出。把收到的每条消息**吸收丢弃**，输入耗尽
 /// 后干净收工——用来**终止**一条数据流分支（下游不再需要结果，但仍需有人把消息取走、
@@ -117,6 +121,7 @@ node_register!("Transform", Transform);
 /// 一个合法的零输出节点，`close()` 无端口可撤，`recv_any` 一旦 `ChannelClosed` 即终止。
 ///
 /// A sink: drains and discards every message via `recv_any`; no outputs.
+// ANCHOR: noop_consumer
 #[inputs(inp)]
 #[outputs]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -132,6 +137,7 @@ impl NoopConsumer {
 }
 
 node_register!("NoopConsumer", NoopConsumer);
+// ANCHOR_END: noop_consumer
 
 /// 广播节点（扇出）：从输入端口 `inp` 收一条消息，**复制**给**数组输出端口** `out` 上挂着的
 /// 每一个下游。`#[outputs(out[])]` 把 `out` 声明成数组端口（字段类型 `Vec<Sender>`）——图里
@@ -149,6 +155,7 @@ node_register!("NoopConsumer", NoopConsumer);
 ///
 /// A broadcast (fan-out) node: clones one input message to every sender in its array
 /// output port. Clone-to-all-but-last, move-into-last; send errors are swallowed.
+// ANCHOR: bcast
 #[inputs(inp: T0)]
 #[outputs(out: [T0])]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -173,6 +180,7 @@ impl Bcast {
 }
 
 node_register!("Bcast", Bcast);
+// ANCHOR_END: bcast
 
 /// 汇聚节点（扇入）：从**数组输入端口** `inps` 上挂着的多个上游里，**谁先来收谁**，把消息转发到
 /// 输出端口 `out`。`#[inputs(inps[])]` 把 `inps` 声明成数组端口（字段类型 `Vec<Receiver>`）——
@@ -196,6 +204,7 @@ node_register!("Bcast", Bcast);
 ///
 /// A merge (fan-in) node: races independent input receivers via `select_ok`, forwarding
 /// the first ready message; skips closed receivers until one is ready or all are closed.
+// ANCHOR: merge
 #[inputs(inps: [T0])]
 #[outputs(out: T0)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -226,6 +235,7 @@ impl Merge {
 }
 
 node_register!("Merge", Merge);
+// ANCHOR_END: merge
 
 // ── Ch4.3：共享资源 `Counter` + 用它的节点 `Tally` ──────────────────────────────
 // 到这里为止，节点的所有字段要么是端口、要么是「从 args 反序列化的自有参数」——每个节点
@@ -300,6 +310,7 @@ resource_register!("Counter", Counter);
 /// **优雅降级**为纯转发——`if let Some(c) = ..` 正是为此。
 ///
 /// A tally-and-forward node: borrows a shared `Counter` at `initialize`, bumps it per message.
+// ANCHOR: tally
 #[inputs(inp)]
 #[outputs(out)]
 #[derive(Node, Actor, BuildFromPorts)]
@@ -337,6 +348,7 @@ impl Tally {
 }
 
 node_register!("Tally", Tally);
+// ANCHOR_END: tally
 
 // ANCHOR: reorder
 /// 按 partial_id 从 0 开始逐个转发。未来 ID 的重复消息替换缓存；旧 ID 和缺口关闭 panic。

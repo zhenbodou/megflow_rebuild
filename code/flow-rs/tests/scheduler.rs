@@ -75,6 +75,7 @@ outputs = [
 ]
 "#;
 
+// ANCHOR: main_test
 #[tokio::test]
 async fn start_runs_all_nodes_then_stop_shuts_down() {
     let mut g = Builder::default().template(TWO_NODE_GRAPH).build().unwrap();
@@ -107,7 +108,9 @@ async fn start_runs_all_nodes_then_stop_shuts_down() {
     // 聚合句柄：两个节点任务都收尾后 resolve，返回 Ok。
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: main_test
 
+// ANCHOR: error_test
 #[tokio::test]
 async fn node_error_propagates_through_aggregate_handle() {
     // op="%" 是未知运算符：节点收到数据后 exec 返回 Err(Arg)，任务以 Err 收尾，
@@ -137,3 +140,4 @@ outputs = [{name="c", cap=8, ports=["div:c"]}]
 
     g.stop();
 }
+// ANCHOR_END: error_test

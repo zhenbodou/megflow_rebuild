@@ -54,6 +54,7 @@ pub fn arg<T: DeserializeOwned>(args: &Args, key: &str) -> Result<T> {
 ///
 /// `#[serde(deny_unknown_fields)]`：拼错的顶层键（如 `grahps`）在**解析期**就报错，
 /// 而非静默忽略——这是「校验前移」的最省事一层：serde 免费帮你挡住笔误。
+// ANCHOR: config_structs
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -138,6 +139,7 @@ pub struct PortConfig {
     #[serde(default)]
     pub ports: Vec<String>,
 }
+// ANCHOR_END: config_structs
 
 /// 一条**内部连接**：channel 容量 `cap` + 挂在这条 channel 上的一组「节点:端口」（Ch4.1）。
 ///
@@ -184,6 +186,7 @@ impl Config {
 /// 解析结果只在接线那一刻用一下，没必要各自持有一份堆分配的拷贝。
 ///
 /// Borrowed view of a `"node:port"` reference; zero-copy, fields borrow from `s`.
+// ANCHOR: port_ref
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortRef<'a> {
     /// 节点实例名（`:` 左侧）。
@@ -205,12 +208,14 @@ impl<'a> PortRef<'a> {
         Ok(PortRef { node, port, tag })
     }
 }
+// ANCHOR_END: port_ref
 
 // ── 测试：钉死 schema 解析与端口引用拆分（红→绿）──
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ANCHOR: config_tests
     /// Ch0.3 契约里那段一字不差的 BinaryOp 图配置。
     const BINARY_OP: &str = r#"
 main = "example"
@@ -350,4 +355,5 @@ resources = [{name="pool", ty="MemPool", capacity=1024}]
         let toml = "[[graphs]]\nname=\"g\"\n";
         assert!(matches!(Config::from_toml(toml), Err(Error::Toml(_))));
     }
+    // ANCHOR_END: config_tests
 }

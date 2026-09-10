@@ -35,6 +35,7 @@ use crate::config::{Config, ConnConfig, GraphConfig, NodeConfig, PortConfig, Por
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 
+// ANCHOR: flatten_fn
 /// 把「主图 + 若干被引用的子图」压平成**一张**扁平图，返回一份新的 `Config`（`main` 不变、
 /// `graphs` 只剩那张扁平图）。装配前调用（见 `Builder::build`）；之后 `assemble` 照旧。
 ///
@@ -82,7 +83,9 @@ pub fn flatten(config: &Config) -> Result<Config> {
         graphs: vec![flat],
     })
 }
+// ANCHOR_END: flatten_fn
 
+// ANCHOR: expand_fn
 /// 递归展开一张图 `g`（当前名字前缀 `prefix`，形如 `"b1/"` 或顶层的 `""`）：
 /// 叶子节点带前缀 push 进 `flat_nodes`，子图节点递归下钻，连接解析后 push 进 `flat_conns`。
 ///
@@ -145,6 +148,7 @@ fn expand(
     ancestors.pop();
     Ok(())
 }
+// ANCHOR_END: expand_fn
 
 /// 把一组对外端口声明的引用逐个解析到叶子（`cap`/`name` 原样保留）。用于主图 inputs/outputs。
 fn resolve_ports(
@@ -179,6 +183,7 @@ fn resolve_refs(
     Ok(out)
 }
 
+// ANCHOR: resolve_ref_fn
 /// 把**一个**端口引用 `r`（在图 `g`、前缀 `prefix` 语境下）解析成若干**叶子**引用，追加进 `out`。
 ///
 /// - `r = "节点:端口"`。先在 `g.nodes` 里按名找这个节点（找不到 → `UnknownNode`）。
@@ -236,10 +241,12 @@ fn resolve_ref(
         }
     }
 }
+// ANCHOR_END: resolve_ref_fn
 
 // ── 测试：钉死压平的恒等性、前缀展开、边界解析、环检测、多层嵌套（红→绿）──
 #[cfg(test)]
 mod tests {
+    // ANCHOR: subgraph_tests
     use super::*;
 
     /// 便捷断言：找到扁平图里某条内部连接（按其端口列表精确匹配）。
@@ -440,4 +447,5 @@ nodes=[{{name="s",ty="Sub"}}]
         let err = flatten(&cfg).unwrap_err();
         assert!(matches!(err, Error::MainGraphNotFound(ref m) if m == "nope"));
     }
+    // ANCHOR_END: subgraph_tests
 }

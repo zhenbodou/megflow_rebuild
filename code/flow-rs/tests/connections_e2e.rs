@@ -35,6 +35,7 @@ connections = [
 ]
 "#;
 
+// ANCHOR: chain
 #[tokio::test]
 async fn internal_connection_chains_two_nodes() {
     let mut g = Builder::default().template(CHAIN_GRAPH).build().unwrap();
@@ -57,11 +58,13 @@ async fn internal_connection_chains_two_nodes() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: chain
 
 // ── 构建期错误校验：连接形态非法 / 端口重复接线，都在 build() 当场报错 ──
 // 这三条都不是 `#[tokio::test]`——它们在 `build()` 就返回 `Err`，根本跑不到运行时。
 // 这正是「校验前移到 build()」：接线错误在建图那一刻暴露，而非等节点跑起来才 panic。
 
+// ANCHOR: build_errors
 /// 一条连接只有输入端口，没有发送端 → BadConnection。多个接收端本身是合法的。
 #[test]
 fn connection_with_no_sender_is_rejected() {
@@ -125,7 +128,9 @@ connections = [
         "got {err:?}"
     );
 }
+// ANCHOR_END: build_errors
 
+// ANCHOR: shared_distribute
 #[tokio::test]
 async fn shared_internal_connection_distributes_without_broadcasting() {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -154,7 +159,9 @@ connections = [{cap=1, ports=["source:out", "left:inp", "right:inp"]}]
         handle.await.unwrap().unwrap();
     }).await.expect("竞争接收与汇聚应完整排空并收尾");
 }
+// ANCHOR_END: shared_distribute
 
+// ANCHOR: multi_target
 #[tokio::test]
 async fn graph_input_multiple_targets_share_one_queue() {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -188,3 +195,4 @@ outputs = [{name="out", cap=1, ports=["left:out", "right:out"]}]
     .await
     .unwrap();
 }
+// ANCHOR_END: multi_target

@@ -23,6 +23,7 @@ use crate::context::Context;
 use crate::error::Result;
 use tokio::task::JoinHandle;
 
+// ANCHOR: node_traits
 /// 节点与图装配交互的接口：判断输入是否关闭、主动关闭输出。
 ///
 /// 端口的**动态绑定**（按配置的 `PortInfo` 把 channel 塞进节点字段）需要配置层，
@@ -57,6 +58,7 @@ pub trait Actor: Node + Send + 'static {
     /// Hand the node to the runtime; return its `JoinHandle`. `ctx` carries shared resources.
     fn start(self: Box<Self>, ctx: Context) -> JoinHandle<Result<()>>;
 }
+// ANCHOR_END: node_traits
 
 // ── 测试：手写一个 `Doubler` 节点，钉死 exec 循环 + 优雅停机的契约 ──
 // A hand-written node (no macros yet) that proves the exec loop & shutdown.
@@ -68,6 +70,7 @@ mod tests {
     use crate::error::Error;
     use flow_message::Envelope;
 
+    // ANCHOR: doubler
     /// 一个「把收到的 i32 翻倍再发出」的最小 worker 节点——**全部手写、不用任何宏**。
     /// 真正的业务逻辑只有 `v * 2` 一行，其余全是样板：端口字段、关闭标志、
     /// `Node`/`Actor` 两个 impl、`start` 里的 spawn + 循环 + 生命周期。
@@ -126,7 +129,9 @@ mod tests {
             })
         }
     }
+    // ANCHOR_END: doubler
 
+    // ANCHOR: doubler_tests
     #[tokio::test]
     async fn doubler_pipes_and_shuts_down() {
         let (in_tx, in_rx) = channel(8);
@@ -174,4 +179,5 @@ mod tests {
         drop(in_tx);
         handle.await.unwrap().unwrap();
     }
+    // ANCHOR_END: doubler_tests
 }

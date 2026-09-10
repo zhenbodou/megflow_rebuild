@@ -56,6 +56,7 @@ pub struct EnvelopeInfo {
 /// 且允许存在**空信封**（`empty` / 载荷已被取走）。
 /// `msg` is `Option<M>` so `unpack` can take the payload out (leaving `None`),
 /// and so empty envelopes are representable.
+// ANCHOR: envelope_struct
 pub struct Envelope<M> {
     info: EnvelopeInfo,
     msg: Option<M>,
@@ -147,9 +148,11 @@ impl<M> Envelope<M> {
         self.msg.is_none()
     }
 }
+// ANCHOR_END: envelope_struct
 
 // 仅当载荷可克隆时，信封才可克隆（广播 Ch4.1 会用到）。
 // Envelope is Clone only when its payload is — broadcast (Ch4.1) needs this.
+// ANCHOR: envelope_clone
 impl<M: Clone> Clone for Envelope<M> {
     fn clone(&self) -> Self {
         Envelope {
@@ -158,6 +161,7 @@ impl<M: Clone> Clone for Envelope<M> {
         }
     }
 }
+// ANCHOR_END: envelope_clone
 
 /// 类型擦除的信封 trait：擦掉泛型 `M`，只暴露**不带泛型**的方法（保持对象安全）。
 /// Type-erased envelope trait: hides the payload type `M`, exposing only
@@ -167,6 +171,7 @@ impl<M: Clone> Clone for Envelope<M> {
 /// 这正是相对原版「手写 unsafe transmute」的改进（Ch1.2 §5）。
 /// `as_any` demotes `self` to `&dyn Any`; the actual downcast is std's *safe*
 /// one — our improvement over the original's hand-rolled `unsafe` transmute.
+// ANCHOR: any_envelope_trait
 pub trait AnyEnvelope: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -181,6 +186,7 @@ pub trait AnyEnvelope: Any {
     fn info(&self) -> &EnvelopeInfo;
     fn info_mut(&mut self) -> &mut EnvelopeInfo;
 }
+// ANCHOR_END: any_envelope_trait
 
 // 要能在类型擦除下克隆，封箱前的载荷 `M` 必须可 `Clone`（否则擦除后无从复制）；`Send`
 // 是跨任务通行证（`SealedEnvelope` 恒为 `+ Send`）。于是 `AnyEnvelope` 的实现前提从
@@ -188,6 +194,7 @@ pub trait AnyEnvelope: Any {
 // 载荷可克隆是同一层约束，只是我们把它写在明面上。
 // Payloads must be `Clone` (to clone after erasure) and `Send`; mirrors the
 // original's implicit `dyn-clone` requirement, made explicit here.
+// ANCHOR: any_envelope_impl
 impl<M: 'static + Send + Clone> AnyEnvelope for Envelope<M> {
     fn as_any(&self) -> &dyn Any {
         self
@@ -211,10 +218,12 @@ impl<M: 'static + Send + Clone> AnyEnvelope for Envelope<M> {
         &mut self.info
     }
 }
+// ANCHOR_END: any_envelope_impl
 
 /// 装箱后的类型擦除信封——channel 真正搬运的东西。`+ Send` 是跨任务通行证（Ch1.1 §3）。
 /// The boxed, type-erased envelope a channel actually carries. `+ Send` is the
 /// cross-task passport (Ch1.1 §3).
+// ANCHOR: sealed_envelope
 pub type SealedEnvelope = Box<dyn AnyEnvelope + Send>;
 
 // 让**封箱后的**信封也能克隆：标准库对 `Box<T>` 只在 `T: Clone` 时给 `Clone`，而 trait
@@ -235,11 +244,13 @@ impl<M: 'static + Send + Clone> Envelope<M> {
         Box::new(self)
     }
 }
+// ANCHOR_END: sealed_envelope
 
 // 便捷 downcast：定义在 `dyn AnyEnvelope + Send` 上（即 SealedEnvelope 的内层类型），
 // 全程走 std 的安全实现，无一处 unsafe。
 // Ergonomic downcast on `dyn AnyEnvelope + Send` (SealedEnvelope's inner type),
 // entirely via std's safe path — zero unsafe.
+// ANCHOR: safe_downcast
 impl dyn AnyEnvelope + Send {
     /// 认领回具体信封类型 `T` 的只读引用；猜错得 `None`。
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
@@ -254,11 +265,13 @@ impl dyn AnyEnvelope + Send {
         self.as_any().is::<T>()
     }
 }
+// ANCHOR_END: safe_downcast
 
 /// 无载荷的占位信封：某些控制路径（停机信号等）需要「一个空信封」而不携带任何 `M`。
 /// A payload-less placeholder envelope, for control paths that need "an empty
 /// envelope" carrying no `M`. It is a second, non-generic implementor of
 /// `AnyEnvelope`, proving the trait isn't tied to `Envelope<M>`.
+// ANCHOR: dummy_envelope
 #[derive(Default, Clone)]
 pub struct DummyEnvelope;
 
@@ -294,6 +307,7 @@ impl AnyEnvelope for DummyEnvelope {
         unimplemented!("DummyEnvelope has no EnvelopeInfo")
     }
 }
+// ANCHOR_END: dummy_envelope
 
 // ── 测试先行（RED→GREEN）：下面这组测试钉死 Ch0.3 的对外契约 ──
 // Tests pin the Ch0.3 public contract.

@@ -9,6 +9,7 @@
 //! `use flow_rs::prelude::*;` suffices to author + register a node, author +
 //! register a resource, and build + run a graph.
 
+// ANCHOR: prelude_authoring
 use flow_rs::prelude::*;
 use std::sync::Arc; // 唯一的额外导入是标准库的 Arc（节点持有 `Arc<资源>` 句柄）——它不属于本引擎。
 
@@ -113,7 +114,9 @@ async fn prelude_only_imports_suffice_end_to_end() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: prelude_authoring
 
+// ANCHOR: prelude_compile_checks
 // ── 编译期完备性检查：其余门面名字也都从这一行 glob 里解析得到 ──────────────
 // 下面这些 item 永不被调用，只要它们**能编译**，就证明对应名字在作用域里。
 
@@ -137,3 +140,4 @@ fn _types_in_scope(_a: Error, _b: Sandbox, _c: MainGraph, _d: Context) {}
 fn _channel_in_scope() -> (Sender, Receiver) {
     channel(1)
 }
+// ANCHOR_END: prelude_compile_checks

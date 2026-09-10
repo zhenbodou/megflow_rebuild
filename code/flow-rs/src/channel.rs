@@ -84,10 +84,12 @@ pub fn channel_with_type(capacity: usize, channel_type: MsgTypeId) -> (Sender, R
 }
 
 /// 端口声明类型与底层通道类型可以不同，转换表将来负责衔接。
+// ANCHOR: type_info_trait
 pub trait TypeInfo {
     fn port_tid(&self) -> MsgTypeId;
     fn chan_tid(&self) -> MsgTypeId;
 }
+// ANCHOR_END: type_info_trait
 
 impl TypeInfo for Sender {
     fn port_tid(&self) -> MsgTypeId {
@@ -289,6 +291,7 @@ mod tests {
     use crate::error::Error;
     use flow_message::Envelope;
 
+    // ANCHOR: channel_tests
     #[tokio::test]
     async fn typed_send_recv_roundtrip() {
         let (tx, rx) = channel(4);
@@ -331,6 +334,7 @@ mod tests {
         let e = sealed.downcast_mut::<Envelope<i32>>().unwrap();
         assert_eq!(e.unpack(), 7);
     }
+    // ANCHOR_END: channel_tests
 }
 
 async fn convert(function: Option<CvtF>, msg: SealedEnvelope) -> Result<SealedEnvelope> {

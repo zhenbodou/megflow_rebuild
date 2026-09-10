@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 /// 节点的运行时上下文：节点名 + 共享资源集合。启动时由引擎交给每个节点。
 /// Per-node runtime context: the node's name and the shared resource collection.
+// ANCHOR: context
 pub struct Context {
     /// 节点在图内的实例名（诊断 / 日志用）。/ the node's instance name.
     pub name: String,
@@ -67,6 +68,7 @@ impl Context {
         self.resources.get(name)
     }
 }
+// ANCHOR_END: context
 
 // ── 测试：匿名上下文查不到资源；带资源的上下文能按名借出（红→绿）──
 #[cfg(test)]

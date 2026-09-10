@@ -1,5 +1,5 @@
 // 本示例只练习 inventory。它与引擎 NodeRegistration 是不同类型的注册表。
-use flow_rs::inventory;
+use inventory;
 
 struct Plugin {
     name: &'static str,

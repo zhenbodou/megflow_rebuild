@@ -51,6 +51,7 @@ connections = [
 ]
 "#;
 
+// ANCHOR: shared_test
 #[tokio::test]
 async fn resource_shared_across_two_nodes() {
     let mut g = Builder::default().template(SHARED_GRAPH).build().unwrap();
@@ -93,6 +94,7 @@ async fn resource_shared_across_two_nodes() {
     g.stop();
     handle.await.unwrap().unwrap();
 }
+// ANCHOR_END: shared_test
 
 /// 沙箱不注入任何资源：Tally 拿 `Context::anonymous()`，`res="missing"` 借不到 → 句柄 `None`
 /// → 优雅降级为纯转发。证明「依赖资源」的节点在资源缺席时不崩、仍能干活。
