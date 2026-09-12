@@ -35,6 +35,14 @@ struct Trigger {}
 #[outputs(out: dyn i32)]
 #[derive(Node)]
 struct TypedTrigger {}
+
+#[inputs(inp: dyn T0)]
+#[derive(Node)]
+struct Consumer {}
+
+#[inputs(inp: dyn i32)]
+#[derive(Node)]
+struct TypedConsumer {}
 // ANCHOR_END: dyn_nodes
 
 // ── 复用 ch09 的夹具：一张只有无类型 `Transform`（原样透传 `SealedEnvelope`）的子图 ──
@@ -215,3 +223,77 @@ async fn derive_dyn_output_with_concrete_payload_is_typed() {
     .unwrap();
 }
 // ANCHOR_END: typed_test
+
+#[tokio::test]
+async fn derive_dyn_inputs_receive_from_instance_outputs() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        // Use separate topics and instances: cloned receivers compete rather than broadcast.
+        for typed in [false, true] {
+            let mut broker = Broker::new();
+            let creator_client = broker.subscribe("input-test".into());
+            let consumer_client = broker.subscribe("input-test".into());
+            let sub = subgraph(SUB_TRANSFORM);
+            let mut creator = DynPorts::<Sender>::new(HashMap::from([(
+                "out".into(),
+                DynPortsConfig {
+                    target: "inp".into(),
+                    cap: 1,
+                    broker: creator_client,
+                    graph_config: sub.clone(),
+                },
+            )]));
+            let config = DynPortsConfig {
+                target: "out".into(),
+                cap: 1,
+                broker: consumer_client,
+                graph_config: sub,
+            };
+            let port = PortInfo {
+                name: "inp".into(),
+                ty: PortType::Dyn,
+                mty: if typed {
+                    MsgType::of::<i32>()
+                } else {
+                    MsgType::any()
+                },
+            };
+            let broker_task = broker.run();
+            let instance = creator
+                .create(8, ResourceCollection::default())
+                .await
+                .unwrap();
+            let sender = creator.fetch_with_cache(8).await.unwrap();
+            sender.send(Envelope::new(43i32)).await.unwrap();
+            if typed {
+                let mut consumer = TypedConsumer {
+                    inp: Default::default(),
+                    input_closed: false,
+                };
+                let _: &DynPorts<ReceiverT<i32>> = &consumer.inp;
+                consumer.set_port_dynamic(&port, config);
+                let receiver: ReceiverT<i32> = consumer.inp.fetch_with_cache(8).await.unwrap();
+                assert_eq!(receiver.recv().await.unwrap().unpack(), 43);
+                drop(receiver);
+                consumer.close();
+            } else {
+                let mut consumer = Consumer {
+                    inp: Default::default(),
+                    input_closed: false,
+                };
+                let _: &DynPorts<Receiver> = &consumer.inp;
+                consumer.set_port_dynamic(&port, config);
+                let receiver = consumer.inp.fetch_with_cache(8).await.unwrap();
+                assert_eq!(receiver.recv::<i32>().await.unwrap().unpack(), 43);
+                drop(receiver);
+                consumer.close();
+            }
+            drop(sender);
+            drop(creator.evict(8));
+            creator.close();
+            instance.await.unwrap().unwrap();
+            broker_task.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}

@@ -79,19 +79,60 @@ async fn sandbox_runs_single_binary_op() {
 }
 // ANCHOR_END: sandbox_path
 
+#[tokio::test]
+async fn closed_output_does_not_stop_consuming_input_pairs() {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut graph = Builder::default()
+            .template(BINARY_OP_GRAPH.replace("cap=16", "cap=1"))
+            .build()
+            .unwrap();
+        let a = graph.input("a").unwrap();
+        let b = graph.input("b").unwrap();
+        drop(graph.take_output("c").unwrap());
+        let task = graph.start();
+        for value in 0..4i32 {
+            a.send(Envelope::new(value)).await.unwrap();
+            b.send(Envelope::new(value)).await.unwrap();
+        }
+        drop(a);
+        drop(b);
+        graph.stop();
+        task.await.unwrap().unwrap();
+    })
+    .await
+    .expect("输出关闭后仍应消费所有有限输入并退出");
+}
+
 // ANCHOR: error_path
 #[tokio::test]
 async fn sandbox_surfaces_node_error() {
-    // op="%" 是未知运算符：节点 exec 返回 Err(Arg)，该错误经节点任务收尾一路抬到
-    // Sandbox::start 的返回值（而非静默吞掉）。
+    // 原版未知运算符执行 unreachable!。当前运行时将节点 panic 包装成 TaskJoin。
     let args: flow_rs::config::Args = toml::from_str(r#"op = "%""#).unwrap();
     let mut sb = Sandbox::with_args("BinaryOp", args).unwrap();
     sb.add_items("a", vec![1i32]).add_items("b", vec![2i32]);
 
-    let result: Result<()> = sb.start().await;
-    assert!(matches!(result, Err(Error::Arg { .. })));
+    let result: Result<()> = tokio::time::timeout(std::time::Duration::from_secs(3), sb.start())
+        .await
+        .expect("节点 panic 后沙箱应结束");
+    assert!(matches!(result, Err(Error::TaskJoin(_))));
 }
 // ANCHOR_END: error_path
+
+#[tokio::test]
+async fn division_panics_are_task_failures() {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        for (left, right) in [(1i32, 0i32), (i32::MIN, -1i32)] {
+            let args = toml::from_str("op = '/' ").unwrap();
+            let mut sandbox = Sandbox::with_args("BinaryOp", args).unwrap();
+            sandbox
+                .add_items("a", vec![left])
+                .add_items("b", vec![right]);
+            assert!(matches!(sandbox.start().await, Err(Error::TaskJoin(_))));
+        }
+    })
+    .await
+    .expect("两种整数除法 panic 都应传播出沙箱");
+}
 
 // ANCHOR: metadata_test
 // 原版 Getting started 的四种运算都要验证；元信息必须来自左输入。

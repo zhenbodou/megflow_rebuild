@@ -1,0 +1,5 @@
+error: 动态端口的消息类型仅支持标量或模板（dyn T0 / dyn String）
+ --> tests/ui/dynamic_trait_object_payload.rs:3:19
+  |
+3 | #[inputs(inp: dyn dyn Send)]
+  |                   ^^^^^^^^

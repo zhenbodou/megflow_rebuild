@@ -48,6 +48,11 @@ jobs:
       - name: Validate Rust implementation
         run: cargo test --manifest-path code/Cargo.toml --workspace --locked
 
+      - name: Reject unsupported acceptance claims
+        run: |
+          python3 scripts/test_acceptance_ledger.py
+          python3 scripts/acceptance_ledger.py
+
       - name: Validate standalone message chapter
         run: python3 scripts/check_message_course.py
 

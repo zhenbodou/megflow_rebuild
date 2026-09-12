@@ -36,7 +36,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// 二元整数运算节点：从输入端口 `a`、`b` 各取一个 `i32`，按参数 `op` 运算，结果发往
-/// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"` / `"/"`；其余值 → `Err(Error::Arg)`。
+/// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"` / `"/"`；未知运算符与原版示例一样 panic。
 ///
 /// 这正是 Ch0.3 验收契约里那张图用的节点类型（TOML 里 `ty="BinaryOp"`）。它刻意做得极小：
 /// 全书第一个「真能跑」的节点，重点是打通「配置 → 装配 → 调度 → 计算 → 出结果」这条链，
@@ -55,26 +55,22 @@ pub struct BinaryOp {
 #[methods]
 impl BinaryOp {
     async fn exec(&mut self) -> Result<()> {
-        // 各收一个操作数。任一输入关闭 → `recv` 返回 `ChannelClosed`，`#[methods]` 生成的
-        // 包装会把它转成「置关闭标志 + Ok」，故这里直接 `?` 即可，无需手写关闭处理。
-        let mut ea = self.a.recv::<i32>().await?;
-        let mut eb = self.b.recv::<i32>().await?;
+        // 与原版 join! 一样，等待两次接收都结束后才处理结果；其中一侧关闭不提前取消另一侧。
+        let (left, right) = futures_util::join!(self.a.recv::<i32>(), self.b.recv::<i32>());
+        let mut ea = left?;
+        let mut eb = right?;
         let (x, y) = (ea.unpack(), eb.unpack());
         let r = match self.op.as_str() {
             "+" => x + y,
             "-" => x - y,
             "*" => x * y,
             "/" => x / y,
-            other => {
-                return Err(Error::Arg {
-                    key: "op".into(),
-                    msg: format!("未知运算符 {other:?}"),
-                })
-            }
+            _ => unreachable!(),
         };
         // `c` 是 `Option<Sender>`——`close()` 会把它置 `None`。仍在时才发。
         if let Some(out) = self.c.as_ref() {
-            out.send(ea.repack(r)).await?;
+            // 原版忽略发送错误；输出关闭不等于本节点输入关闭。
+            out.send(ea.repack(r)).await.ok();
         }
         Ok(())
     }
@@ -82,6 +78,29 @@ impl BinaryOp {
 
 node_register!("BinaryOp", BinaryOp);
 // ANCHOR_END: binary_op
+
+#[cfg(test)]
+mod binary_op_protocol_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_left_input_still_waits_for_right_receive() {
+        let (left, a) = crate::channel::channel(1);
+        let (right, b) = crate::channel::channel(1);
+        drop(left);
+        let mut node = BinaryOp { a, b, c: None, input_closed: false, op: "+".into() };
+        {
+            let execution = node.exec();
+            tokio::pin!(execution);
+            // Poll directly: left is closed, right is empty and open. No timing guesses.
+            assert!(futures_util::poll!(&mut execution).is_pending());
+            drop(right);
+            tokio::time::timeout(std::time::Duration::from_secs(1), execution)
+                .await.unwrap().unwrap();
+        }
+        assert!(node.input_closed);
+    }
+}
 
 /// 类型无关直通节点：从输入端口 `inp` 收一条消息，原样转发到输出端口 `out`。
 ///

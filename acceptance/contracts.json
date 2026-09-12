@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "reference_commit": "95f870bfefd48fa31f9cf88320de4cc177985c72",
+  "contracts": [
+    {
+      "id": "binary-op-observable-protocol",
+      "state": "实现中",
+      "source": {
+        "path": "flow-rs/src/lib.rs",
+        "sha256": "11111d1e4ea48f6f0180d6ea56d93887052a7c2b972c0ce0b379fb8894fd8c77",
+        "start": 15, "end": 54
+      },
+      "input": "两个 i32 信封与 op 参数；包含四则运算、输入关闭和输出关闭",
+      "output": "四则运算结果，复用左信封元信息",
+      "errors": "未知操作符、除零和有符号除法溢出导致节点 panic；原版全局传播仍待验证",
+      "side_effects": "接收两条输入；即使输出发送失败仍继续消费输入",
+      "lifecycle": "join 等待两侧接收结束；普通输入关闭结束节点",
+      "implementation": ["code/flow-rs/src/builtin.rs"],
+      "tests": ["code/flow-rs/tests/binary_op_e2e.rs", "code/flow-rs/src/builtin.rs"],
+      "chapters": ["book/src/part3/ch04-binaryop-e2e.md", "book/src/part0/ch03-reference.md"],
+      "checks": ["cargo test --manifest-path code/Cargo.toml -p flow-rs --test binary_op_e2e --locked", "cargo test --manifest-path code/Cargo.toml -p flow-rs --lib binary_op_protocol_tests --locked"],
+      "remaining": ["原版运算符构造解析与构造错误时机", "全局任务错误传播与异常收尾", "从上一章累计构建的完整文件快照"]
+    },
+    {
+      "id": "dynamic-ports-close",
+      "state": "实现中",
+      "source": {
+        "path": "flow-rs/src/node/port.rs",
+        "sha256": "19408c2c85c079862cae6c6784383e7d3c3b6f818eea8aa7894b826f8ce7eda1",
+        "start": 238, "end": 246
+      },
+      "input": "持有缓存端点和外部端点克隆时调用 close",
+      "output": "原版关闭 Broker 和缓存中的通道",
+      "errors": "等待中的收发按原版通道关闭协议结束",
+      "side_effects": "关闭共享通道状态，而不只是删除局部句柄",
+      "lifecycle": "关闭通知和数据通道；回收任务仍需等待",
+      "implementation": ["code/flow-rs/src/dyn_ports.rs", "code/flow-derive/src/node.rs"],
+      "tests": ["code/flow-rs/tests/dyn_port_derive.rs"],
+      "chapters": ["book/src/part4/ch09a-derive-dyn-ports.md", "book/src/part4/ch09b-config-auto-wiring.md", "book/src/part4/ch09c-dyn-demux-in-graph.md"],
+      "checks": ["cargo test --manifest-path code/Cargo.toml -p flow-rs --test dyn_port_derive --locked"],
+      "remaining": ["当前 close 只关闭 Broker", "补齐通道显式关闭及克隆传播", "添加仍持有克隆时关闭的测试", "完整逐章独立复现"]
+    }
+  ]
+}

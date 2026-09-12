@@ -1,13 +1,13 @@
 # Ch4.9c DynDemux 装进真实图 + Sandbox 动态端口
 
-[Ch4.9](ch09-dynports.md) 造出运行期环路（create → publish → fetch → route）、[Ch4.9a](ch09a-derive-dyn-ports.md) 让 `#[outputs(out: dyn T0)]` 长出 `DynPorts` 字段 + 生成 `set_port_dynamic`、[Ch4.9b](ch09b-config-auto-wiring.md) 让 config 建图期**自动接线**动态子图——但触发方一直是**测试夹具**（Ch4.9 的裸 `route`、Ch4.9b 的 `AutoTrigger`）。真实 TOML 里写 `ty="DynDemux"` 还用不了，这正是 [Ch4.7c](ch07c-demux-node.md) §5 结尾（「动态端口在原版 Sandbox 中还涉及 broker 与临时图……尚未实现」）与 [Ch4.9b](ch09b-config-auto-wiring.md) §8 明确 defer 的最后一块。
+[Ch4.9](ch09-dynports.md) 造出运行期环路（create → publish → fetch → route）、[Ch4.9a](ch09a-derive-dyn-ports.md) 让 `#[outputs(out: dyn T0)]` 长出 `DynPorts` 字段 + 生成 `set_port_dynamic`、[Ch4.9b](ch09b-config-auto-wiring.md) 让 config 建图期**自动接线**动态子图——但触发方一直是**测试夹具**（Ch4.9 的裸 `route`、Ch4.9b 的 `AutoTrigger`）。本课把触发逻辑接入 `ty="DynDemux"` 的注册节点，这正是 [Ch4.7c](ch07c-demux-node.md) §5 结尾（「动态端口在原版 Sandbox 中还涉及 broker 与临时图……尚未实现」）与 [Ch4.9b](ch09b-config-auto-wiring.md) §8 明确 defer 的最后一块。
 
 本章合上整条弧，做两件事：
 
 1. 把那条环路封装成**注册内置节点** `DynDemux`（住进 `code/flow-rs/src/builtin.rs`）——真实 TOML 写 `ty="DynDemux"` 就能用，由 [Ch4.9b](ch09b-config-auto-wiring.md) 的 `Builder::build` 自动接线驱动，对齐原版 `node/demux.rs` 的 `DynDemux`。
 2. 给 [Ch3.4](../part3/ch04-binaryop-e2e.md) 的单节点 `Sandbox` 补上**动态输出端口支持**（一个内部 broker + 一张平凡汇子图），让 `DynDemux` 这类 dyn 节点能被单独测试。
 
-**恒等护栏先说死**：`DynDemux` 只是**新增**一个注册节点，既有节点一个不动；Sandbox 的 dyn 支持只在「被测节点有 dyn 端口」时才触发，非 dyn 节点的沙箱路径**逐字节不变**。既有 subgraph / graph / demux / 资源 / dyn_ports / dyn_wiring 测试**一字不改继续绿**。
+动态支持应保留已有静态图与沙箱的行为，已有测试用于回归验证。不以这些测试证明所有输入下逐字节等价；动态生命周期需单独检查。
 
 <!-- toc -->
 
@@ -28,7 +28,7 @@
 
 - **有载荷信封**：`is_cached` 没命中 → `create` 一个实例（`JoinHandle` 收进 `tasks`），再 `fetch_with_cache` 取回该 key 的入口 `Sender`、`send_any` 灌进去。**每 key 只 create 一次**。
 - **空信封**（`is_none`）：拆除信号——`evict` 撤掉该 key 的入口端点（实例失去唯一外部 `Sender` → 优雅停机），`await` 它的 `JoinHandle`。
-- **`finalize`**：输入关闭后，把残留实例逐一 `evict` 再 `await`，确保没有实例挂在后台（比原版「只 await」更稳，不必依赖每个 key 都收到过拆除信号——对齐 [Ch4.9b](ch09b-config-auto-wiring.md) `AutoTrigger`）。
+- **`finalize`**：输入关闭后，把残留实例逐一 `evict` 再 `await`，在实例能够结束的正常路径等待它们退出。原版还依靠端点的显式 close；当前重构通过 evict 释放持有权，不能只比较 finalize 的几行代码就宣称更稳或等价。
 
 ## 2. `DynDemux`：注册版内置节点
 
@@ -102,7 +102,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 {{#include ../../../code/flow-rs/src/sandbox.rs:sandbox_dyn_wiring}}
 ```
 
-`start()`（见 `code/flow-rs/src/sandbox.rs`）里的次序沿用 [Ch4.8](ch08-broker.md) 的硬纪律：**先** `broker.run()`（订阅早在 `with_args` 就为每个 dyn 端口做完了——订阅先于 run），**再** spawn 节点；节点收尾后才 `await` broker 句柄（节点 `close()` drop 掉 `BrokerClient` → topic fan-out 任务结束 → broker 句柄解析）。无 dyn 端口时 `broker` 为 `None`、这两步都是空操作——**恒等护栏**就落在这里。
+`start()`（见 `code/flow-rs/src/sandbox.rs`）里的次序沿用 [Ch4.8](ch08-broker.md) 的硬纪律：**先** `broker.run()`（订阅早在 `with_args` 就为每个 dyn 端口做完了——订阅先于 run），**再** spawn 节点；节点收尾后才 `await` broker 句柄（节点 close 关闭 Broker 通知 → topic fan-out 任务结束 → broker 句柄解析）。无 dyn 端口时 `broker` 为 `None`、这两步都是空操作——**恒等护栏**就落在这里。
 
 于是 `DynDemux` 能在单节点沙箱里跑通——create → fetch → route → 拆除 → 干净停机全程不挂（`tokio::time::timeout` 守住任何挂起）：
 
@@ -118,7 +118,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test dyn_demux_graph --l
 
 ## 5. 落差与后续：这一章**没做**什么
 
-整条 DynPorts 弧到此与原版 `node/demux.rs` + `node/port.rs` + `graph/mod.rs` 业务逻辑对齐。以下是**继续 defer** 的诚实边界，都在原版本就分层或本书 Rust-only 范围之外：
+本章完成一条注册节点驱动动态汇子图的基础链，但尚未证明整条 DynPorts 协议与原版等价。下面的资源继承、实例参数和 Sandbox 动态输入**仍在纯 Rust 目标范围内，必须继续实现与讲解**；只有最后一项 Python/C 绑定路径被排除。
 
 - **资源只注入、不链接**——原版 `ext_resource.chain(in_resource)` 把外层注入资源与子图自带资源链起来、按 instance-id 分尺度；本弧多个实例共享同一注入集合，子图暂不声明自带 `resources`。这是 [Ch4.9](ch09-dynports.md) 起就记着的 defer，本章的注册节点不改变它。
 - **`DynPortsConfig.args` 未合并**——原版按 instance 用 `merge_table` 覆盖实例参数；本弧 `create` 接受 `cap` 但不做 args 合并。
@@ -133,3 +133,19 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test dyn_demux_graph --l
 - **Sandbox 动态端口支持**：dyn 输出端口配内部 broker + 平凡 `NoopConsumer` 汇子图当惰性构造器，`set_port_dynamic` 注入——与建图期同一套动作；`start()` 先 run 后 spawn、收尾后 await broker；无 dyn 端口恒为 `None`、逐字节恒等。
 - **落差诚实标注**：资源只注入不链接、`args` 未合并、Sandbox 无 dyn 输入、Python/C-FFI 路径——都在原版分层或 Rust-only 范围外，边界写清。
 - flow-rs 测试从 151 抬到 **153**（新增 `dyn_demux_graph` 的 2 个测试）；既有 151 个一字不改继续绿——恒等护栏成立。
+
+## 完整测试文件与证据边界
+
+下面是 `code/flow-rs/tests/dyn_demux_graph.rs` 的完整内容，包含资源、Probe、配置、全部导入以及两个测试。按前文讲解逐段填写后，用这份完整文件检查是否漏掉注册或辅助代码。
+
+```rust
+{{#include ../../../code/flow-rs/tests/dyn_demux_graph.rs}}
+```
+
+本章测试的观察量要分别解释：初始化次数证明创建数量；载荷日志证明消息到达；等待图句柄与超时证明这个正常场景能结束。若日志没有记录实例 key，就不能仅凭载荷集合证明每一条都进入了正确 key 的实例；应另用 Ch4.9b 的有状态分 key 场景验证，进一步增强本测试时也应记录归属，而不是只增加消息条数。
+
+Sandbox 的 NoopConsumer 会丢弃数据。因此“沙箱能结束”不证明业务输出正确，更不证明动态输入支持。真实图测试和沙箱测试回答不同问题，不能互相替代。
+
+独立练习：画出 tasks 和 out.cache 两张表的关系。前者保存运行任务句柄，后者保存通信端点；删除其中一张的项为什么不会自动删除另一张？再分析空信封到达一个尚未创建的 key 时应发生什么，先读当前 exec，再对照原版，分别记录两者的行为和待补测试。
+
+关闭路径的已知差异见 [Ch4.9a](ch09a-derive-dyn-ports.md)：原版 close 还会关闭缓存通道，当前重构只关闭 Broker。这个差异与资源继承、参数覆盖一样属于验收缺口，不能在本章小结中改写为目标外工作。

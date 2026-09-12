@@ -249,7 +249,13 @@ impl Parse for PortSpec {
             // 动态端口：`name: dyn T`（T 可为模板 `T0` 或具体类型）。注入 `DynPorts<..>`（Ch4.9a）。
             // `dyn T0`（模板）→ 无类型 `DynPorts<Sender|Receiver>`；`dyn String`（具体）→ 类型化特化。
             if input.peek(Token![dyn]) {
-                input.parse::<Token![dyn]>()?;
+                let keyword: Token![dyn] = input.parse()?;
+                if input.is_empty() || input.peek(Token![,]) {
+                    return Err(syn::Error::new_spanned(
+                        keyword,
+                        "dyn 后缺少消息类型，例如 dyn T0 或 dyn String",
+                    ));
+                }
                 let payload: Type = input.parse()?;
                 if matches!(
                     payload,
@@ -312,6 +318,7 @@ impl Parse for PortSpec {
 ///
 /// 端口的类型写作**裸名** `Receiver`（要求使用处 `use flow_rs::channel::Receiver`）。
 /// 用绝对路径 `::flow_rs::..` 做卫生化留到后续（见章末「边界」）。
+// ANCHOR: dynamic_inputs_full
 pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
     let ident = item.ident.clone();
     {
@@ -389,6 +396,8 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
 /// `#[outputs(a, b[], ..)]`：为每个端口注入字段——标量端口 `name: Option<Sender>`，数组端口
 /// `name: Vec<Sender>`（扇出/广播）。标量用 `Option` 是为了让 `close()` 能把它置 `None` →
 /// drop 掉 `Sender` → 下游收到关闭；数组则靠 `close()` 里 `.clear()` 达到同样效果。
+// ANCHOR_END: dynamic_inputs_full
+// ANCHOR: dynamic_outputs_full
 pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
     let ident = item.ident.clone();
     {
@@ -452,6 +461,7 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
 /// 收集输出端口字段：`(字段名, 是否数组端口)`。用 port_kind 精确识别
 /// Vec<Sender> 与 Option<Sender>，避免把业务类型 HistorySender 当成端口。
 /// `close()` 据此选择「置 `None`」还是「清空 `Vec`」。
+// ANCHOR_END: dynamic_outputs_full
 fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
     let mut outs = Vec::new();
     if let Data::Struct(data) = &input.data {
@@ -468,7 +478,7 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
                     Some(PortKind::TypedOutput) => outs.push((id.clone(), PortKind::TypedOutput)),
                     Some(PortKind::OutputArray) => outs.push((id.clone(), PortKind::OutputArray)),
                     Some(PortKind::OutputDict) => outs.push((id.clone(), PortKind::OutputDict)),
-                    // 动态端口（输入/输出）都持一张实例缓存，close 时 evict 掉所有实例端点。
+                    // 动态端口 close 通知 Broker；实例缓存另由 evict 或字段 drop 释放。
                     Some(PortKind::OutputDyn) => outs.push((id.clone(), PortKind::OutputDyn)),
                     Some(PortKind::InputDyn) => outs.push((id.clone(), PortKind::InputDyn)),
                     _ => {}
@@ -496,7 +506,7 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
             if *kind == PortKind::TypedOutput {
                 quote! { self.#id = Default::default(); }
             } else if matches!(kind, PortKind::OutputDyn | PortKind::InputDyn) {
-                quote! { self.#id.close(); } // 动态端口：evict 掉缓存里每份实例的端点
+                quote! { self.#id.close(); } // 关闭 Broker，不清空实例端点缓存。
             } else if matches!(kind, PortKind::OutputArray | PortKind::OutputDict) {
                 quote! { self.#id.clear(); } // 数组输出：清空 Vec → drop 掉每个 Sender
             } else {
@@ -941,6 +951,32 @@ mod tests {
 
     fn id(s: &str) -> Ident {
         Ident::new(s, proc_macro2::Span::call_site())
+    }
+
+    #[test]
+    fn dynamic_port_grammar_consumes_keyword_before_payload_type() {
+        for syntax in ["out: dyn T0", "out: dyn i32", "out: dyn Vec<u8>"] {
+            let port: PortSpec = parse_str(syntax).unwrap();
+            assert!(port.is_dyn);
+            assert!(!port.array && !port.dict);
+            assert!(port.payload.is_some());
+        }
+        for syntax in ["out: dyn", "out: dyn [u8]", "out: dyn [u8; 4]", "out: dyn dyn Send"] {
+            assert!(parse_str::<PortSpec>(syntax).is_err(), "accepted {syntax}");
+        }
+    }
+
+    #[test]
+    fn dynamic_port_classification_distinguishes_all_four_endpoint_types() {
+        for (syntax, expected) in [
+            ("DynPorts<Sender>", PortKind::OutputDyn),
+            ("DynPorts<SenderT<i32>>", PortKind::OutputDyn),
+            ("DynPorts<Receiver>", PortKind::InputDyn),
+            ("DynPorts<ReceiverT<i32>>", PortKind::InputDyn),
+        ] {
+            assert_eq!(port_kind(&parse_str::<Type>(syntax).unwrap()), Some(expected));
+        }
+        assert_eq!(port_kind(&parse_str::<Type>("DynPorts<HistorySender>").unwrap()), None);
     }
 
     /// 标量端口声明（`name`）。/ scalar port spec.

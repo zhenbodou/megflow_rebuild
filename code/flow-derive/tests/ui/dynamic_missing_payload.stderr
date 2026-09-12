@@ -1,0 +1,5 @@
+error: dyn 后缺少消息类型，例如 dyn T0 或 dyn String
+ --> tests/ui/dynamic_missing_payload.rs:3:16
+  |
+3 | #[outputs(out: dyn)]
+  |                ^^^

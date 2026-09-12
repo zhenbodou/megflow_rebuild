@@ -1,10 +1,10 @@
 # Ch4.9b config 认识 dyn 连接：自动接线动态子图
 
-[Ch4.9](ch09-dynports.md) 把运行期环路（create → publish → fetch → route）造了出来，但全靠**手搓**：手写 `DynPorts`、手挂 broker 订阅、example/测试里显式驱动。[Ch4.9a](ch09a-derive-dyn-ports.md) 让节点作者写 `#[outputs(out: dyn T0)]` 就长出 `DynPorts` 字段、派生宏还生成了 `Node::set_port_dynamic`——可它**没有调用者**，注册表里的 `INPUT_DYN`/`OUTPUT_DYN` 标记表也还没人读。
+[Ch4.9](ch09-dynports.md) 把运行期环路（create → publish → fetch → route）造了出来，但全靠**手搓**：手写 `DynPorts`、手挂 broker 订阅、example/测试里显式驱动。[Ch4.9a](ch09a-derive-dyn-ports.md) 让节点作者写 `#[outputs(out: dyn T0)]` 就长出 `DynPorts` 字段、派生宏还生成了 `Node::set_port_dynamic`——上一课通过手工注入测试它，本课继续实现建图期的调用，并读取注册表的 `INPUT_DYN`/`OUTPUT_DYN` 标记表。
 
 本章补上最后一块，把这两头接起来：**config 层认识 `dyn` 连接**。目标是——TOML 里写一个 dyn 输出/输入的触发节点 + 一张动态子图 + 一条连接，`Builder::build` 就**自动**：`flatten` 跳过 dyn 子图（保留成惰性 `GraphConfig`）、装配期识别 dyn 连接并**自动**为 dyn 端口 `set_port_dynamic` 注入 `DynPortsConfig`、让 `MainGraph` 自带 broker 生命周期。读者写的是**声明**，不再是驱动代码。对齐原版 `flow-rs/src/graph/mod.rs` 数 `dyn_rxn`/`dyn_txn` + 校验 + 建 `DynPortsConfig` 那段。
 
-**恒等护栏先说死**：无 `dyn` 连接的配置，`flatten` 与 `assemble` 逐字节走老路径、`broker` 恒为 `None`——既有 subgraph / graph / demux / 资源 / dyn_ports 测试**一字不改继续绿**。新增只发生在「有 dyn 连接」这条新分支上。
+对于不含动态连接的配置，仍应选择静态装配路径，broker 为 None。已有静态图测试用于检查回归；测试通过不证明所有输入逐字节等价，也不代替原版行为对照。
 
 <!-- toc -->
 
@@ -17,7 +17,7 @@
 | 一条连接里**同时**有「注册节点的 dyn 端口」+「子图位点引用」 | 认成 **dyn 连接**：**不**建静态 channel；`broker.subscribe(topic=位点名)`、构造并 `set_port_dynamic` 注入 `DynPortsConfig` |
 | 静态子图（没被任何 dyn 连接引用） | `flatten` **内联**（[Ch4.4](ch04-subgraph.md) 原样，前缀展开） |
 | dyn 子图（被 dyn 连接引用） | `flatten` **不内联**，保留成惰性 `GraphConfig`，assemble 期现装实例 |
-| 整图无 dyn 连接 | **恒等**：`broker = None`、走老 `assemble_graph`（逐字节等价） |
+| 整图无 dyn 连接 | **恒等**：`broker = None`、走老 `assemble_graph`（保留静态装配路径） |
 
 方向规则**反直觉但正确**（[Ch4.9a](ch09a-derive-dyn-ports.md) 点破过）：dyn **输出**端口持 `DynPorts<Sender>`，要往实例**入口**灌数据，故它的边界必须落在子图的 `inputs` 上；dyn **输入**端口持 `DynPorts<Receiver>`，从实例**出口**收结果，边界必须落在子图的 `outputs` 上。违反方向、或形态非法的，建图期直接报错（对齐原版 `graph/mod.rs` 的 dyn 连接校验）：
 
@@ -132,11 +132,11 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test dyn_wiring_e2e --lo
 cargo test --manifest-path code/Cargo.toml -p flow-rs --locked
 ```
 
-本章把 flow-rs 测试总数从 147 抬到 **151**（新增 4 个 `dyn_wiring_e2e` 测试）；既有 147 个一字不改继续绿——恒等护栏成立。
+测试数量以实际命令输出为准。这里检查新增动态场景和已有静态场景，不以历史测试总数证明完整兼容。
 
 ## 8. 落差与后续：这一章**没做**什么
 
-- **`DynDemux` 还不是注册 builtin**——本章触发节点 `AutoTrigger` 是**测试夹具**，不在 `builtin.rs`、真实 TOML 里 `ty="DynDemux"` 还用不了。把这套环路封装成注册节点 + Sandbox 动态端口支持（内部 broker + 临时图），已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 实现，也正是 [Ch4.7c](ch07c-demux-node.md) §5 明确 defer 的那块。
+- **本章使用测试夹具 AutoTrigger**，让建图和实例生命周期可直接观察；它与当前仓库已注册的 DynDemux 不是同一个节点。把这套环路封装成注册节点 + Sandbox 动态端口支持（内部 broker + 临时图），已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 实现，也正是 [Ch4.7c](ch07c-demux-node.md) §5 明确 defer 的那块。
 - **资源只注入、不链接**——原版 `ext_resource.chain(in_resource)` 把外层注入资源与子图自带资源链起来、按 instance-id 分尺度；本章多个实例共享同一注入集合（`AutoTrigger` 甚至只传 `ResourceCollection::default()`），子图暂不声明自带 `resources`。这是 [Ch4.9](ch09-dynports.md) 记过的 defer，本章的自动接线不改变它。
 - **`DynPortsConfig.cap` 接受但用法最小**——建图期从连接的 `cap` 取值填进去，`create` 里 `assemble_graph` 用子图自身的边界容量装配；原版按 instance 合并 `args`（`merge_table`）本弧继续 defer。
 
@@ -146,5 +146,25 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --locked
 - **flatten 跳过 dyn 子图**：`dynamic_refs` 注册表驱动地认出 dyn 子图引用，`expand` 不内联、保留成惰性 `GraphConfig`；无 dyn 连接时返回空集、退化为恒等静态压平。
 - **`DynWiring::from_conn` 是心脏**：一条连接解析成 (触发节点, dyn 端口, topic=位点名, target=边界端口)，按反直觉方向规则校验；`Ok(None)` 是普通连接的恒等出口。
 - **topic = 位点节点名**：同站点的 feed/collect 共用 topic，一次 `create` 广播两端都收得到——broker「每订阅者一份克隆」的直接用法。
-- **broker 进图**：`MainGraph.broker: Option<Broker>`，`start()` 先 `run()` 后 spawn（订阅先于 run）、节点收尾后再 await broker；无 dyn 连接恒为 `None`、逐字节恒等。
+- **broker 进图**：`MainGraph.broker: Option<Broker>`，`start()` 先 `run()` 后 spawn（订阅先于 run）、节点收尾后再 await broker；无 dyn 连接恒为 `None`、沿用静态装配路径。
 - **落差诚实标注**：`DynDemux` 成注册 builtin、Sandbox dyn 支持已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 实现；资源只注入不链接、`args` 未合并仍是整条弧的既定 defer。
+
+## 完整测试与逐步排错
+
+本章前面的代码块分别解释夹具、配置和断言，下面给出 `code/flow-rs/tests/dyn_wiring_e2e.rs` 的完整内容，包含全部导入与辅助函数：
+
+```rust
+{{#include ../../../code/flow-rs/tests/dyn_wiring_e2e.rs}}
+```
+
+运行前先沿一条连接手工填写四个名字：持有动态字段的节点名、该字段名、作为 topic 的子图位点名、作为 target 的边界端口名。前两个决定配置注入到哪里，后两个决定从哪个通知队列取出哪个端点。它们都是 String，但不能互换。
+
+`Result<Option<DynWiring>>` 不是重复包装：Err 表示配置非法；Ok(None) 表示合法的普通连接，交给静态路径；Ok(Some(...)) 表示动态连接，继续构造配置。问号只展开外层 Result，不会把 None 自动当成错误。
+
+练习：先将 target 指向反方向的边界，预测是建图阶段失败还是运行时超时；再运行 reversed_boundary_is_rejected 核对。恢复后给 key 7 连发第三条消息，预测计数为 3，而不是新实例的 1。最后保持 key 42 的第一条计数为 1，证明不同实例状态没有混在一起。
+
+### 正常收尾与错误收尾必须分开
+
+当前 start 聚合任务中的 `handle.await.map_err(...)??` 有两层问号：外层处理任务 panic/取消，内层处理节点返回的业务错误。任意一层失败都会提前返回，因此后面的节点句柄与 Broker 句柄未必被 await；丢弃 Tokio JoinHandle 不会自动取消底层任务。
+
+所以本章第 6 节的“节点收尾后等待 Broker”描述的是**所有已等待节点成功返回的路径**，不能概括为失败时也回收全部任务。完整监督和错误收尾仍是验收缺口，必须增加失败节点与仍在运行的兄弟任务场景后才能声称解决。关闭动态缓存通道的另一处缺口见 [Ch4.9a 的生命周期排错](ch09a-derive-dyn-ports.md#生命周期排错为什么-close-后仍可能等不到实例退出)。

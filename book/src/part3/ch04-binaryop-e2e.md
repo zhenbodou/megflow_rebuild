@@ -148,13 +148,25 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test sandbox_envelopes -
 
 ## 6. 错误也走得通
 
-顺带验一条错误支线——`op="%"` 是未知运算符，`exec` 收到数据后返回 `Err(Arg)`，这个错误应当**抬到** `Sandbox::start` 的返回值，而非被静默吞掉：
+先区分接收与发送的失败。原版用 `futures_util::join!` 同时等待 a、b 的接收；join 不会在其中一个 Result 为 Err 时提前返回，而会等另一个 Future 也结束。当前实现先得到 `(left, right)`，再分别使用问号。因此 a 已关闭、b 仍为空且未关闭时，本次 exec 仍等待 b。依次写 `a.recv().await?; b.recv().await?;` 会在 a 关闭时立即退出，改变原版等待行为。
+
+`closed_left_input_still_waits_for_right_receive` 直接 poll 一次 exec，确认这时返回 Pending，再关闭 b，验证 exec 结束并设置 input_closed。直接轮询确定了 Future 的状态，不需要 sleep。维护命令：
+
+```bash
+cargo test --manifest-path code/Cargo.toml -p flow-rs --lib binary_op_protocol_tests --locked
+```
+
+输出发送失败则与输入关闭不同：原版用 `.ok()` 忽略它，继续消费后续输入对。若这里使用问号，输出的 ChannelClosed 会被 methods 包装误当成输入关闭，提前终止节点。`closed_output_does_not_stop_consuming_input_pairs` 在启动前丢弃输出接收端，再通过容量 1 的输入队列发送四对数据；节点若提前退出，后续发送会失败。最后关闭输入并等待任务结束，证明有限输入仍能被排空。
+
+再验一条失败支线：`op="%"` 是未知运算符。固定版本原版示例在这里执行 `unreachable!()`；重构现在同样让节点任务 panic，而不是改成普通参数错误。当前 Sandbox 把 Tokio JoinError 包装为 Error::TaskJoin：
 
 ```rust
 {{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:error_path}}
 ```
 
-它验证当前重构的错误支线：节点的业务错误经任务收尾、经 `node.await...?` 的内层抬出，得到 Arg。**这里尚与原版不一致**：原版上手示例的未知运算符进入 `unreachable!()`，产生 panic；当前实现返回业务错误。行为兼容包括错误种类，不能把这项测试通过写成原版错误路径已验证。后续必须对齐并更新对应测试和教学，或明确记录为经批准的行为变化。
+这里有两层结果：节点函数返回的 Result 是业务层；等待任务得到的 Result 是任务层。panic 不会变成节点主动返回的 Err，而是使等待任务得到 JoinError。Sandbox 映射后返回 TaskJoin。不要由此推断 panic 仍会执行异步 finalize：正常 Result::Err 路径中的收尾代码，在栈展开时可能被跳过。
+
+新增的 division_panics_are_task_failures 使用两组输入：1 / 0 与 i32::MIN / -1。两者都必须导致任务失败，三秒超时限制确保测试不会无限等待。测试不匹配整段 panic 文本，因为它可能随编译器变化；断言的是当前公开 API 的任务错误类别。这里对齐了节点的失败方式，原版全局运行时如何包装和传播 panic 仍需单独验收。
 
 ## 小结
 
@@ -191,7 +203,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test sandbox_envelopes -
 
 ## 本章终点与复现
 
-**验收命令**（照抄可跑，四项测试全绿）：
+**验收命令**（六项集成测试，另有上面的接收等待单元测试）：
 
 ```bash
 cargo test --manifest-path code/Cargo.toml -p flow-rs --test binary_op_e2e --locked
@@ -204,6 +216,8 @@ test binary_op_end_to_end_via_graph ... ok
 test sandbox_runs_single_binary_op ... ok
 test sandbox_surfaces_node_error ... ok
 test all_operations_preserve_left_envelope_metadata ... ok
+test division_panics_are_task_failures ... ok
+test closed_output_does_not_stop_consuming_input_pairs ... ok
 ```
 
 下面给出本章端到端测试文件的完整内容，包含前面片段省略的导入、配置常量和所有测试。将它写入 `code/flow-rs/tests/binary_op_e2e.rs` 后运行上面的命令。
