@@ -33,7 +33,8 @@
 
 use crate::config::{Config, ConnConfig, GraphConfig, NodeConfig, PortConfig, PortRef};
 use crate::error::{Error, Result};
-use std::collections::HashMap;
+use crate::registry;
+use std::collections::{HashMap, HashSet};
 
 // ANCHOR: flatten_fn
 /// 把「主图 + 若干被引用的子图」压平成**一张**扁平图，返回一份新的 `Config`（`main` 不变、
@@ -55,6 +56,9 @@ pub fn flatten(config: &Config) -> Result<Config> {
     let mut flat_nodes: Vec<NodeConfig> = Vec::new();
     let mut flat_conns: Vec<ConnConfig> = Vec::new();
     let mut ancestors: Vec<String> = Vec::new();
+    // 动态子图引用**不内联**、保留为惰性 `GraphConfig` 收进 `retained`——`assemble` 期按名装配
+    // 成运行期实例（Ch4.9b）。无 dyn 连接时 `retained` 恒为空 → 压平仍是恒等变换。
+    let mut retained: Vec<GraphConfig> = Vec::new();
     expand(
         main,
         "",
@@ -62,12 +66,14 @@ pub fn flatten(config: &Config) -> Result<Config> {
         &mut ancestors,
         &mut flat_nodes,
         &mut flat_conns,
+        &mut retained,
     )?;
 
     // 对外输入/输出 = 主图的对外端口，引用同样按子图边界解析到叶子（主图前缀为空）。
     // expand(main) 已先把整棵子图树校验为无环，故这里的 resolve 递归必然终止（见 resolve_ref）。
-    let flat_inputs = resolve_ports(main, "", &graphs, &main.inputs)?;
-    let flat_outputs = resolve_ports(main, "", &graphs, &main.outputs)?;
+    let main_dyn = dynamic_refs(main, &graphs)?;
+    let flat_inputs = resolve_ports(main, "", &graphs, &main_dyn, &main.inputs)?;
+    let flat_outputs = resolve_ports(main, "", &graphs, &main_dyn, &main.outputs)?;
 
     let flat = GraphConfig {
         name: main.name.clone(),
@@ -78,9 +84,12 @@ pub fn flatten(config: &Config) -> Result<Config> {
         // 资源取主图的：压平后一张图，主图资源被所有节点共享（回答 Ch4.3 的跨图共享钩子）。
         resources: main.resources.clone(),
     };
+    // 扁平主图在前，其后跟着被保留的动态子图（惰性构造器）；无 dyn 引用时 retained 为空 → 恒等。
+    let mut graphs_out = vec![flat];
+    graphs_out.extend(retained);
     Ok(Config {
         main: config.main.clone(),
-        graphs: vec![flat],
+        graphs: graphs_out,
     })
 }
 // ANCHOR_END: flatten_fn
@@ -99,6 +108,7 @@ fn expand(
     ancestors: &mut Vec<String>,
     flat_nodes: &mut Vec<NodeConfig>,
     flat_conns: &mut Vec<ConnConfig>,
+    retained: &mut Vec<GraphConfig>,
 ) -> Result<()> {
     if ancestors.iter().any(|a| a == &g.name) {
         return Err(Error::SubgraphCycle(g.name.clone()));
@@ -116,32 +126,53 @@ fn expand(
         }
     }
 
-    // 节点：ty 是图名 → 子图引用，递归展开（前缀追加 `节点名/`）；否则叶子，带前缀原样收下。
+    // 预扫本图连接：哪些子图引用参与了 dyn 端口连接 → 不内联、留作运行期惰性构造器（Ch4.9b）。
+    let dyn_set = dynamic_refs(g, graphs)?;
+
+    // 节点：ty 是图名 → 子图引用。dyn 子图引用**不内联**、整张去重保留进 `retained`（assemble 期
+    // 按名装配成运行期实例）；静态子图引用递归展开（前缀追加 `节点名/`）；否则叶子，带前缀原样收下。
     for nd in &g.nodes {
-        if let Some(sub) = graphs.get(nd.ty.as_str()) {
-            let child_prefix = format!("{}{}/", prefix, nd.name);
-            expand(
-                sub,
-                &child_prefix,
-                graphs,
-                ancestors,
-                flat_nodes,
-                flat_conns,
-            )?;
-        } else {
-            flat_nodes.push(NodeConfig {
-                name: format!("{}{}", prefix, nd.name),
-                ty: nd.ty.clone(),
-                args: nd.args.clone(),
-            });
+        match graphs.get(nd.ty.as_str()) {
+            Some(sub) if dyn_set.contains(nd.name.as_str()) => {
+                // dyn 子图引用：节点原样保留（ty 仍是图名，assemble 据此识别并装配实例），
+                // 子图定义去重收进 retained（惰性构造器）。
+                flat_nodes.push(NodeConfig {
+                    name: format!("{}{}", prefix, nd.name),
+                    ty: nd.ty.clone(),
+                    args: nd.args.clone(),
+                });
+                if !retained.iter().any(|r| r.name == sub.name) {
+                    retained.push((*sub).clone());
+                }
+            }
+            Some(sub) => {
+                let child_prefix = format!("{}{}/", prefix, nd.name);
+                expand(
+                    sub,
+                    &child_prefix,
+                    graphs,
+                    ancestors,
+                    flat_nodes,
+                    flat_conns,
+                    retained,
+                )?;
+            }
+            None => {
+                flat_nodes.push(NodeConfig {
+                    name: format!("{}{}", prefix, nd.name),
+                    ty: nd.ty.clone(),
+                    args: nd.args.clone(),
+                });
+            }
         }
     }
 
     // 内部连接：每个端口引用解析到叶子（子图边界端口会被下钻穿透，可能一变多）。
+    // dyn 子图引用当叶子：引用原样带前缀透传，保留给 assemble 期识别接线。
     for conn in &g.connections {
         flat_conns.push(ConnConfig {
             cap: conn.cap,
-            ports: resolve_refs(g, prefix, graphs, &conn.ports)?,
+            ports: resolve_refs(g, prefix, graphs, &dyn_set, &conn.ports)?,
         });
     }
 
@@ -150,11 +181,52 @@ fn expand(
 }
 // ANCHOR_END: expand_fn
 
+// ANCHOR: dynamic_refs_fn
+/// 预扫图 `g` 的所有连接，返回**本图内**参与了 dyn 端口连接的**子图引用节点名**集合。
+///
+/// 判定（注册表驱动，与原版 `graph/mod.rs` 数 `dyn_rxn`/`dyn_txn` 同源）：遍历一条连接的端口
+/// 引用——若某个**叶子**节点的端口经 `registry::find` 查得是 dyn（`output_is_dyn`/`input_is_dyn`），
+/// 这条连接就是一条 **dyn 连接**；同一条连接里引用到的**子图**节点（`ty` 是图名）便是该 dyn
+/// 连接的动态实例目标，收进集合——`expand` 据此不内联它们、`resolve_ref` 据此把它们当叶子透传。
+///
+/// 恒等性：既有所有节点 `output_is_dyn`/`input_is_dyn` 恒 false（`INPUT_DYN`/`OUTPUT_DYN` 为空表
+/// → 防御式回退 false），故无 dyn 端口的配置返回**空集**，`flatten` 退化为原来的静态压平。
+fn dynamic_refs(
+    g: &GraphConfig,
+    graphs: &HashMap<&str, &GraphConfig>,
+) -> Result<HashSet<String>> {
+    let mut dynamic = HashSet::new();
+    for conn in &g.connections {
+        let mut has_dyn = false;
+        let mut subgraph_refs: Vec<String> = Vec::new();
+        for r in &conn.ports {
+            let pref = PortRef::parse(r)?;
+            // 找不到的节点这里跳过（不是本函数的职责）：真正的 UnknownNode 由 resolve_ref 报。
+            let Some(nd) = g.nodes.iter().find(|n| n.name == pref.node) else {
+                continue;
+            };
+            if graphs.contains_key(nd.ty.as_str()) {
+                subgraph_refs.push(pref.node.to_owned());
+            } else if let Some(reg) = registry::find(&nd.ty) {
+                if reg.output_is_dyn(pref.port) || reg.input_is_dyn(pref.port) {
+                    has_dyn = true;
+                }
+            }
+        }
+        if has_dyn {
+            dynamic.extend(subgraph_refs);
+        }
+    }
+    Ok(dynamic)
+}
+// ANCHOR_END: dynamic_refs_fn
+
 /// 把一组对外端口声明的引用逐个解析到叶子（`cap`/`name` 原样保留）。用于主图 inputs/outputs。
 fn resolve_ports(
     g: &GraphConfig,
     prefix: &str,
     graphs: &HashMap<&str, &GraphConfig>,
+    dyn_set: &HashSet<String>,
     ports: &[PortConfig],
 ) -> Result<Vec<PortConfig>> {
     ports
@@ -163,7 +235,7 @@ fn resolve_ports(
             Ok(PortConfig {
                 name: pc.name.clone(),
                 cap: pc.cap,
-                ports: resolve_refs(g, prefix, graphs, &pc.ports)?,
+                ports: resolve_refs(g, prefix, graphs, dyn_set, &pc.ports)?,
             })
         })
         .collect()
@@ -174,11 +246,12 @@ fn resolve_refs(
     g: &GraphConfig,
     prefix: &str,
     graphs: &HashMap<&str, &GraphConfig>,
+    dyn_set: &HashSet<String>,
     refs: &[String],
 ) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for r in refs {
-        resolve_ref(g, prefix, graphs, r, &mut out)?;
+        resolve_ref(g, prefix, graphs, dyn_set, r, &mut out)?;
     }
     Ok(out)
 }
@@ -201,6 +274,7 @@ fn resolve_ref(
     g: &GraphConfig,
     prefix: &str,
     graphs: &HashMap<&str, &GraphConfig>,
+    dyn_set: &HashSet<String>,
     r: &str,
     out: &mut Vec<String>,
 ) -> Result<()> {
@@ -212,7 +286,12 @@ fn resolve_ref(
         .ok_or_else(|| Error::UnknownNode(pref.node.to_owned()))?;
 
     match graphs.get(nd.ty.as_str()) {
-        // 子图引用：把边界端口映射到内部端口，逐个下钻。
+        // dyn 子图引用：当叶子——引用原样带前缀透传（assemble 据 ty 识别并接线，**不下钻**）。
+        Some(_) if dyn_set.contains(pref.node) => {
+            out.push(format!("{}{}", prefix, r));
+            Ok(())
+        }
+        // 静态子图引用：把边界端口映射到内部端口，逐个下钻。
         Some(sub) => {
             if pref.tag.is_some() {
                 return Err(Error::Unsupported(
@@ -229,8 +308,9 @@ fn resolve_ref(
                     port: pref.port.to_owned(),
                 })?;
             let child_prefix = format!("{}{}/", prefix, pref.node);
+            let child_dyn = dynamic_refs(sub, graphs)?;
             for inner in &decl.ports {
-                resolve_ref(sub, &child_prefix, graphs, inner, out)?;
+                resolve_ref(sub, &child_prefix, graphs, &child_dyn, inner, out)?;
             }
             Ok(())
         }

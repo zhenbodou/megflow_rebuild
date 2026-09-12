@@ -32,7 +32,7 @@ str2addr("camera:42") 对应的键下。发送者为信封设置相同的 to_add
 
 这一节点只有静态路由表。收到一个新的未知地址不会创建输出，也不会创建子图。
 空的类型化信封仍是一条可转发消息，不会删除路由；DynDemux 的动态创建与删除
-属于另一套协议，尚需后续开发。
+属于另一套协议，已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 实现（运行期 create / 拆除环路）。
 
 ## 3. 用真实图逐项验收
 
@@ -72,7 +72,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test demux_e2e --locked
 Sender 克隆。这些位置对应不同阶段，不能全部归结为“宏有问题”。
 
 本节已完成静态 Demux 在当前 Builder 的路由接入。Sandbox 的静态字典标签接口在下节补齐；
-DynDemux、原版完整关闭/flush/资源作用域等仍属于整本书后续必须完成的部分。
+DynDemux 已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 实现；原版完整关闭/flush/资源作用域等仍属于整本书后续必须完成的部分。
 
 ## 5. 在 Sandbox 中单独测试字典节点
 
@@ -105,5 +105,5 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test sandbox_dictionary 
 全部到达。随后比较图配置可以声明多个标签，而 Sandbox 固定为每个端口一条、标签
 为 0。这是两种测试工具的具体装配规则，不能自行用数组序号扩展 Sandbox 标签协议。
 
-动态端口在原版 Sandbox 中还涉及 broker 与临时图。本次仅接入静态字典，不包含
-这些尚未实现的动态机制。
+动态端口在原版 Sandbox 中还涉及 broker 与临时图。本节仅接入静态字典；那套动态机制
+（内部 broker + 平凡汇子图）已在 [Ch4.9c](ch09c-dyn-demux-in-graph.md) 给 Sandbox 补上。

@@ -72,6 +72,10 @@
 - [Ch4.7b 实现字典端口宏与按地址装配](part4/ch07b-dictionary-ports.md)
 - [Ch4.7c 把 Demux 装进真实图](part4/ch07c-demux-node.md)
 - [Ch4.8 Broker：给动态子图广播通知](part4/ch08-broker.md)
+- [Ch4.9 DynPorts：运行期动态子图实例（机制层）](part4/ch09-dynports.md)
+- [Ch4.9a 派生宏 dyn 端口：set_port_dynamic 与类型化特化](part4/ch09a-derive-dyn-ports.md)
+- [Ch4.9b config 认识 dyn 连接：自动接线动态子图](part4/ch09b-config-auto-wiring.md)
+- [Ch4.9c DynDemux 装进真实图 + Sandbox 动态端口](part4/ch09c-dyn-demux-in-graph.md)
 
 # 第 5 部分 · 兼容 · 优化 · 收尾
 

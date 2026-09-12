@@ -20,6 +20,7 @@ pub mod builtin;
 pub mod channel;
 pub mod config;
 pub mod context;
+pub mod dyn_ports;
 pub mod envelope;
 pub mod error;
 pub mod graph;

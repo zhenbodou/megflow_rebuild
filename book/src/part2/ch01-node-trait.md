@@ -224,7 +224,7 @@ node_register!("Doubler", Doubler);
 |---|---|---|---|
 | 双 trait | `Node` + `Actor` | 同 | 划分照搬 |
 | `start` 返回 | `rt::task::JoinHandle`（自制 rt） | `tokio::task::JoinHandle` | 换主流运行时 |
-| `Node` 方法 | set_port / 动态端口 / stats / anchor / close / is_allinp_closed | 只 `close` / `is_all_input_closed` | 端口动态绑定属图装配（Part 3）、stats/anchor 属 profile（非核心），按需后置 |
+| `Node` 方法 | set_port / 动态端口 / stats / anchor / close / is_allinp_closed | `close` / `is_all_input_closed`（+ Ch4.9a 起一个 `set_port_dynamic` 默认 no-op） | 静态端口在构造时直接注入；`set_port_dynamic` 是**动态子图**的运行期注入钩子，默认空实现、Ch4.9a 起由派生宏按需覆盖；stats/anchor 属 profile（非核心），按需后置 |
 | 端口注入 | 由 Graph Builder 经 `set_port` 动态绑定 | 构造时直接注入 | 配置层还没造，Part 3 补 |
 | `exec` 参数 | `&Context` | 无参 | `Context`（停机信号等）Part 3 引入 |
 
@@ -242,6 +242,8 @@ node_register!("Doubler", Doubler);
 ```rust
 {{#include ../../../code/flow-rs/src/node.rs:node_traits}}
 ```
+
+> **含 `set_port_dynamic` 默认实现**：上面的真实 `Node` trait 除了 `close`/`is_all_input_closed`，还带一个 `set_port_dynamic` 默认 no-op——**动态子图**（Part 4 末）的运行期端口注入钩子。本章读作「空实现占位」即可：没有动态端口的节点原样不受影响，带 `dyn` 端口的节点由 `#[derive(Node)]` 生成覆盖，来龙去脉 Ch4.9a 讲透。
 
 **手写 `Doubler` 节点（真实源码，`mod tests` 内的夹具）**：
 

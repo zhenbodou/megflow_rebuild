@@ -21,11 +21,18 @@
 //! ```
 //!
 //! A single-node test harness: build by type name, feed inputs, check outputs.
-//! A teaching subset of the original `Sandbox` (no broker / dynamic ports).
+//! A teaching subset of the original `Sandbox`; Ch4.9c adds minimal dynamic
+//! *output* port support (an internal broker + a trivial sink subgraph) so a
+//! registered dyn node like `DynDemux` runs in isolation. Dynamic *input*
+//! ports stay deferred — they'd need a producer subgraph, and no pure-producer
+//! builtin exists.
 
+use crate::broker::Broker;
 use crate::channel::{channel, Receiver, Sender};
-use crate::config::Args;
+use crate::config::interlayer::{MsgType, PortInfo, PortType};
+use crate::config::{Args, Config, GraphConfig};
 use crate::context::Context;
+use crate::dyn_ports::DynPortsConfig;
 use crate::error::{Error, Result};
 use crate::node::Actor;
 use crate::registry;
@@ -36,6 +43,38 @@ use std::pin::Pin;
 
 /// 原版静态 Sandbox 使用容量 0，即无界队列。
 const SANDBOX_CAP: usize = 0;
+
+// ── Ch4.9c：动态**输出**端口的沙箱支持 ─────────────────────────────────────────
+// 被测节点若有 `dyn` 输出（如 `DynDemux` 的 `out`），它运行期会 `create` 出子图实例、把数据
+// 灌进去。图里这实例由 config 自动接线指向某张真实子图（Ch4.9b）；沙箱里没有那张图，于是我们
+// 给它一张**最小汇子图**当惰性构造器——一个 `NoopConsumer`（收下即弃），边界入口叫 `inp`。
+// 被测节点的 `create` 便造出这个「黑洞」实例、`fetch` 回它的入口 `Sender`、`send_any` 灌进去，
+// 数据被安静吸收。这足以在隔离中把 dyn 节点的 create→fetch→route→拆除环路真实跑一遍。
+
+// ANCHOR: sandbox_sink
+/// 沙箱给 dyn 输出端口配的最小汇子图名。
+const SANDBOX_SINK_GRAPH: &str = "_sandbox_sink_";
+/// 该汇子图的边界入口端口名（`DynPortsConfig.target` 取它 → 从 `DynConns.inputs` 抽这一端）。
+const SANDBOX_SINK_BOUNDARY: &str = "inp";
+
+/// 造一张「边界入口 `inp` → 一个 `NoopConsumer`」的最小汇子图 `GraphConfig`，作 dyn 输出端口的
+/// 惰性构造器。用 TOML 解析（与真实图同一条 `Config::from_toml` 路径），不手搓 `GraphConfig`。
+fn sandbox_sink_subgraph() -> Result<GraphConfig> {
+    let toml = format!(
+        r#"
+main = "{SANDBOX_SINK_GRAPH}"
+[[graphs]]
+name = "{SANDBOX_SINK_GRAPH}"
+nodes = [{{ name = "sink", ty = "NoopConsumer" }}]
+inputs = [{{ name = "{SANDBOX_SINK_BOUNDARY}", cap = 16, ports = ["sink:inp"] }}]
+"#
+    );
+    Ok(Config::from_toml(&toml)?
+        .main_graph()
+        .expect("沙箱汇子图恒有 main 图")
+        .clone())
+}
+// ANCHOR_END: sandbox_sink
 
 /// 喂数 / 收数任务的类型擦除句柄：一串「跑到自然结束」的 future。
 /// `add_data`/`add_check` 是泛型（按端口消息类型 `T` 单态化），把各自的 future 装箱后
@@ -55,6 +94,9 @@ pub struct Sandbox {
     outputs: HashMap<String, Receiver>,
     /// 原版按端口名共用一个登记表，后登记覆盖前登记（包括不同方向同名端口）。
     subs: HashMap<String, SubFactory>,
+    /// Ch4.9c：被测节点有 dyn 输出端口时，沙箱自建的内部 broker（`start` 时 `run`）。无 dyn
+    /// 端口 → `None`、`start` 里空操作——非 dyn 节点的沙箱路径逐字节不变（恒等护栏）。
+    broker: Option<Broker>,
 }
 
 impl Sandbox {
@@ -77,30 +119,71 @@ impl Sandbox {
         // 故每个端口都是**恰好 1 个的组**（`vec![rx]`）——数组端口在这里退化成 1 路，真正的
         // N 路扇出/扇入靠 graph 端到端测试覆盖。
         let mut inputs = HashMap::new();
-        let mut ins: Vec<Vec<registry::TaggedEndpoint<Receiver>>> =
-            Vec::with_capacity(reg.inputs.len());
+        let mut ins: Vec<Vec<registry::TaggedEndpoint<Receiver>>> = Vec::new();
         for &port in reg.inputs {
+            // Ch4.9c：dyn 输入端口需要一张**产出侧**临时子图，本教学子集不支持——明确报错。
+            if reg.input_is_dyn(port) {
+                return Err(Error::Unsupported(format!(
+                    "sandbox 暂不支持动态输入端口 {port:?}（需要一张产出侧临时子图）"
+                )));
+            }
             let (tx, rx) = channel(SANDBOX_CAP);
             inputs.insert(port.to_owned(), tx);
             ins.push(vec![registry::TaggedEndpoint::new(rx, Some(0))]);
         }
-        // 输出端口：channel 的 Sender 给节点，Receiver 留给沙箱（供 add_check 收数）。
+        // 输出端口：非 dyn 各开一条 channel（Sender 给节点、Receiver 留沙箱供 add_check）。
+        // Ch4.9c：dyn 输出端口**不开** channel——其字段是 `DynPorts`（构造器走 `Default`、不从
+        // outs 取），先记下端口名，节点造好后再 `set_port_dynamic` 接到汇子图（下方）。
         let mut outputs = HashMap::new();
-        let mut outs: Vec<Vec<registry::TaggedEndpoint<Sender>>> =
-            Vec::with_capacity(reg.outputs.len());
+        let mut outs: Vec<Vec<registry::TaggedEndpoint<Sender>>> = Vec::new();
+        let mut dyn_outputs: Vec<String> = Vec::new();
         for &port in reg.outputs {
+            if reg.output_is_dyn(port) {
+                dyn_outputs.push(port.to_owned());
+                continue;
+            }
             let (tx, rx) = channel(SANDBOX_CAP);
             outputs.insert(port.to_owned(), rx);
             outs.push(vec![registry::TaggedEndpoint::new(tx, Some(0))]);
         }
 
         // 端口按注册表的名表顺序排成位置 Vec，交给构造器（与 Graph Builder 同一套接线逻辑）。
-        let actor = (reg.tagged_ctor)(&args, ins, outs)?;
+        let mut actor = (reg.tagged_ctor)(&args, ins, outs)?;
+
+        // Ch4.9c：dyn 输出端口——建一个内部 broker + 一张 NoopConsumer 汇子图当惰性构造器，
+        // `set_port_dynamic` 注入（对齐 Ch4.9b 建图期的注入，只是这里 topic/子图是沙箱现造的）。
+        // topic 用端口名（单节点、每端口独立 topic 足够）。无 dyn 输出 → broker 为 `None`、恒等。
+        // ANCHOR: sandbox_dyn_wiring
+        let broker = if dyn_outputs.is_empty() {
+            None
+        } else {
+            let mut broker = Broker::new();
+            let sink = sandbox_sink_subgraph()?;
+            for port in &dyn_outputs {
+                let client = broker.subscribe(port.clone());
+                let cfg = DynPortsConfig {
+                    target: SANDBOX_SINK_BOUNDARY.to_owned(),
+                    cap: SANDBOX_CAP,
+                    broker: client,
+                    graph_config: sink.clone(),
+                };
+                let port_info = PortInfo {
+                    name: port.clone(),
+                    ty: PortType::Dyn,
+                    mty: MsgType::any(),
+                };
+                actor.set_port_dynamic(&port_info, cfg);
+            }
+            Some(broker)
+        };
+        // ANCHOR_END: sandbox_dyn_wiring
+
         Ok(Sandbox {
             actor: Some(actor),
             inputs,
             outputs,
             subs: HashMap::new(),
+            broker,
         })
     }
 
@@ -226,6 +309,11 @@ impl Sandbox {
         self.inputs.clear();
         self.outputs.clear();
 
+        // Ch4.9c：dyn 输出端口——先把内部 broker `run` 起来。订阅早在 `with_args` 就为每个 dyn
+        // 端口做完了（**订阅先于 run** 是 Ch4.8 硬纪律），被测节点 `create`/`publish`/`fetch` 才有
+        // broker 可用。无 dyn 端口 → `broker` 为 `None`、这步空操作（恒等护栏）。
+        let broker_handle = self.broker.take().map(|mut broker| broker.run());
+
         // 沙箱不注入任何共享资源：给节点一个空 `Context`（Ch4.3）。于是「依赖某资源」的
         // 节点在沙箱里会拿到 `None`、优雅降级（如 Tally 少了计数器就只转发不计数）——单节点
         // 测试聚焦端口行为，共享资源的真正验证留给 graph 端到端测试。
@@ -246,6 +334,14 @@ impl Sandbox {
             .await
             .map_err(|error| Error::TaskJoin(error.to_string()))
             .and_then(|result| result);
+        // 节点收尾时 `close()` 掉持有的 `BrokerClient`（且实例入口 Sender 被 evict）——每 topic 的
+        // fan-out 任务随之结束、broker 句柄解析。放在节点 await 之后，避免早退漏收它。
+        if let Some(handle) = broker_handle {
+            let _ = handle
+                .await
+                .map_err(|error| Error::TaskJoin(error.to_string()))
+                .and_then(|result| result);
+        }
         if let Some(error) = first_error {
             Err(error)
         } else {

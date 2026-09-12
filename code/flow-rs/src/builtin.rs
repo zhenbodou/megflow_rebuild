@@ -29,9 +29,11 @@ use flow_rs::context::Context;
 use flow_rs::error::{Error, Result};
 use flow_rs::node::{Actor, Node};
 use flow_rs::registry::BuildFromPorts;
-use flow_rs::resource::BuildResource;
+use flow_rs::resource::{BuildResource, ResourceCollection};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 /// 二元整数运算节点：从输入端口 `a`、`b` 各取一个 `i32`，按参数 `op` 运算，结果发往
 /// 输出端口 `c`。`op` 支持 `"+"` / `"-"` / `"*"` / `"/"`；其余值 → `Err(Error::Arg)`。
@@ -421,3 +423,100 @@ impl Demux {
 }
 node_register!("Demux", Demux);
 // ANCHOR_END: static_demux
+
+// ── Ch4.9c：动态地址分流的**注册版** `DynDemux`（内置节点）───────────────────────
+// Ch4.9（机制层）造出运行期 create→publish→fetch→route 环路、Ch4.9a 让 `dyn` 端口语法长出
+// `DynPorts` 字段 + `set_port_dynamic`、Ch4.9b 让 config 建图期**自动接线**动态子图——但触发方
+// 一直是**测试夹具**（Ch4.9 的 example、Ch4.9b 的 `AutoTrigger`）。本节把那条环路封装成一个
+// **注册内置节点**：真实 TOML 里写 `ty="DynDemux"` 就能用，由 `Builder::build` 的自动接线驱动。
+// 对齐原版 `node/demux.rs` 的 `DynDemux`——单个 `dyn` 输出、按 `to_addr` 把每条流分到「按 key
+// 现装一次」的**汇子图实例**里，是原版「按视频流条数现装实例」的忠实重写。
+
+/// 动态地址分流（注册版）：从 `inp` 收无类型消息，按信封 `to_addr` 把它路由到一份**按需现装、
+/// 每 key 只建一次**的动态子图实例。`out` 是**动态输出**（`#[outputs(out: dyn T0)]`，持
+/// `DynPorts<Sender>`）——建图期由 config 自动接线（[Ch4.9b](ch09b-config-auto-wiring.md)）指向某个
+/// 动态子图位点，运行期 `create` 出实例、`fetch` 回入口 `Sender`、`send_any` 灌进去。
+///
+/// 是**喂入侧单向**的（对齐原版 `node/demux.rs`）：只有一个 dyn 输出、只往实例入口喂，不从实例
+/// 收结果。实例是**汇子图**（末端落进资源，无对外出口），这与 Ch4.9b `AutoTrigger` 夹具的
+/// feed+collect 双向不同——原版 `logical_test.toml` 的 `destination` 子图正是这种「只收不还」的汇。
+///
+/// - **有载荷信封**：`is_cached` 没命中就 `create`（把实例 `JoinHandle` 收进 `tasks`），再
+///   `fetch_with_cache` 取回该 key 的入口 `Sender`、把消息灌进实例。`initialize` 时从 `Context`
+///   取的 `resources` 随 `create` 一路穿进子图实例——于是实例与外层图**共享同一份资源集**
+///   （Ch4.9 记过的「注入不链接」：`ext_resource.chain` 的链接语义本弧仍 defer）。
+/// - **空信封**（`is_none`）：拆除信号——`evict` 撤掉该 key 的入口端点（实例失去唯一外部
+///   `Sender` → 优雅停机）、`await` 它的 `JoinHandle`。
+/// - **`finalize`**：输入关闭后，把残留实例逐一 `evict` 再 `await`，确保没有实例挂在后台
+///   （比原版「只 await」更稳——不必依赖每个 key 都收到过拆除信号；对齐 Ch4.9b `AutoTrigger`）。
+///
+/// 与静态 `Demux`（上面，`out: {T0}` 字典端口、路由到**建图期就接好**的固定下游）的对照就是
+/// 这条弧的主题：`DynDemux` 的下游是**运行期现装**的子图实例，一条流一份、可创建可拆除。
+///
+/// A registered feed-only dynamic demux: routes by `to_addr` into per-key, created-once
+/// dynamic subgraph instances; injects its Context resources into each `create`.
+// ANCHOR: dyn_demux
+#[inputs(inp: T0)]
+#[outputs(out: dyn T0)]
+#[derive(Node, Actor, BuildFromPorts)]
+pub struct DynDemux {
+    /// 每个 key 的实例任务句柄：`create` 现装时收进来，拆除 / `finalize` 时 `await` 它收尾。
+    #[state]
+    tasks: HashMap<u64, JoinHandle<Result<()>>>,
+    /// 注入给实例的共享资源集：`initialize` 从 `Context` 取一份，`create` 时穿进子图实例。
+    #[state]
+    resources: Option<ResourceCollection>,
+}
+
+#[methods]
+impl DynDemux {
+    async fn initialize(&mut self, ctx: &Context) {
+        // 取外层图的共享资源集（`ResourceCollection` 是 `Arc` 共享的廉价克隆）。
+        self.resources = Some(ctx.resources.clone());
+    }
+
+    async fn exec(&mut self) -> Result<()> {
+        let message = self.inp.recv_any().await?;
+        let key = message
+            .info()
+            .to_addr
+            .expect("the envelope has no destination address");
+
+        // 空信封 = 拆除：撤入口端点（实例失去唯一外部 Sender → 停机），再 await 其任务收尾。
+        if message.is_none() {
+            if let Some(handle) = self.tasks.remove(&key) {
+                self.out.evict(key);
+                handle.await.ok();
+            }
+            return Ok(());
+        }
+
+        // 有载荷：每 key 只 create 一次（is_cached 把门），把注入的 resources 穿进实例。
+        if !self.out.is_cached(key) {
+            let resources = self.resources.clone().unwrap_or_default();
+            let handle = self.out.create(key, resources).await?;
+            self.tasks.insert(key, handle);
+        }
+        // fetch 回入口 Sender、灌数据。send 用 `.ok()`：别把「实例通道已关」误判成「我的输入关」。
+        self.out
+            .fetch_with_cache(key)
+            .await?
+            .send_any(message)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    async fn finalize(&mut self) {
+        // 收尾：撤掉所有残留实例的入口端点、再 await 各任务，确保没有实例挂在后台。
+        let keys: Vec<u64> = self.tasks.keys().copied().collect();
+        for key in keys {
+            self.out.evict(key);
+        }
+        for (_, handle) in self.tasks.drain() {
+            handle.await.ok();
+        }
+    }
+}
+node_register!("DynDemux", DynDemux);
+// ANCHOR_END: dyn_demux

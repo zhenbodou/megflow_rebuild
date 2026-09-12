@@ -37,6 +37,22 @@ pub trait Node {
     /// 所有输入端口是否都已关闭 → 调度器据此结束 `exec` 循环。
     /// Whether every input port is closed; the scheduler ends the loop when true.
     fn is_all_input_closed(&self) -> bool;
+
+    // ANCHOR: set_port_dynamic
+    /// 运行期**动态端口注入**：把某个动态端口的
+    /// [`DynPortsConfig`](crate::dyn_ports::DynPortsConfig) 按端口名塞进节点对应字段的
+    /// `DynPorts`。默认是 **no-op**——没有动态端口的节点原样不受影响；带 `dyn` 端口的节点由
+    /// `#[derive(Node)]` **生成覆盖**（Ch4.9a）。图装配期在节点**构造后**调用它完成动态子图
+    /// 接线（Ch4.9b），对齐原版 `node/mod.rs` 的 `set_port_dynamic`。
+    /// Inject a dynamic port's config at wiring time; default no-op, overridden by the derive.
+    fn set_port_dynamic(
+        &mut self,
+        port_info: &crate::config::interlayer::PortInfo,
+        config: crate::dyn_ports::DynPortsConfig,
+    ) {
+        let _ = (port_info, config);
+    }
+    // ANCHOR_END: set_port_dynamic
 }
 
 /// 节点与调度器交互的接口：被 spawn 成一个 tokio 任务。

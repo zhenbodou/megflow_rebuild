@@ -77,6 +77,10 @@ pub struct NodeRegistration {
     pub input_array: &'static [bool],
     /// 与 `outputs` 并行：每个输出端口是否**数组端口**（`Vec<Sender>` → true，扇出）。
     pub output_array: &'static [bool],
+    /// 与 `inputs`/`outputs` 并行：每个端口是否**动态端口**（`DynPorts<..>` → true，Ch4.9a）。
+    /// 建图期（Ch4.9b）靠它识别一条连接是否指向动态子图，从而改走 `set_port_dynamic` 注入。
+    pub input_dyn: &'static [bool],
+    pub output_dyn: &'static [bool],
     /// 该类型的构造器（`<T as BuildFromPorts>::build`）。
     pub input_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
     pub output_types: fn() -> Vec<crate::config::interlayer::MsgTypeId>,
@@ -120,6 +124,26 @@ impl NodeRegistration {
             .map(|i| self.output_array[i])
             .unwrap_or(false)
     }
+
+    /// 该输入端口是否**动态端口**（`DynPorts<Receiver..>`；查无此端口或表更短 → false）。
+    /// 用防御式 `.get(i)`（同 dict）：手写 `BuildFromPorts` 靠 `INPUT_DYN = &[]` 默认值即安全。
+    pub fn input_is_dyn(&self, port: &str) -> bool {
+        self.inputs
+            .iter()
+            .position(|p| *p == port)
+            .and_then(|i| self.input_dyn.get(i))
+            .copied()
+            .unwrap_or(false)
+    }
+    /// 该输出端口是否**动态端口**（`DynPorts<Sender..>`）。
+    pub fn output_is_dyn(&self, port: &str) -> bool {
+        self.outputs
+            .iter()
+            .position(|p| *p == port)
+            .and_then(|i| self.output_dyn.get(i))
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 // 声明「本 crate 收集 `NodeRegistration` 条目」。`collect!` 必须与被收集类型同 crate，
@@ -147,6 +171,10 @@ pub trait BuildFromPorts {
     /// 与 `INPUTS` 并行的数组标记：每个输入端口是否 `Vec<Receiver>`（数组端口）。
     const INPUT_DICT: &'static [bool] = &[];
     const OUTPUT_DICT: &'static [bool] = &[];
+    /// 与 `INPUTS`/`OUTPUTS` 并行的动态端口标记（`DynPorts<..>` → true，Ch4.9a）。默认 `&[]`
+    /// ——手写 `BuildFromPorts`（如 `tests/tagged_constructor.rs`）无需声明，`input_is_dyn` 防御式回退 false。
+    const INPUT_DYN: &'static [bool] = &[];
+    const OUTPUT_DYN: &'static [bool] = &[];
     const INPUT_ARRAY: &'static [bool];
     /// 与 `OUTPUTS` 并行的数组标记：每个输出端口是否 `Vec<Sender>`（数组端口）。
     const OUTPUT_ARRAY: &'static [bool];

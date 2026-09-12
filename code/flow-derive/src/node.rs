@@ -70,10 +70,12 @@ enum PortKind {
     Input,
     InputArray,
     InputDict,
+    InputDyn,
     Output,
     TypedOutput,
     OutputArray,
     OutputDict,
+    OutputDyn,
 }
 
 fn dict_value(ty: &Type) -> Option<&Type> {
@@ -104,6 +106,16 @@ fn dict_value(ty: &Type) -> Option<&Type> {
 }
 
 fn port_kind(ty: &Type) -> Option<PortKind> {
+    // 动态端口 `DynPorts<..>`（Ch4.9a）：句柄里装的是 Sender/SenderT → 触发方的**输出**动态端口
+    // （把消息推进实例入口）；Receiver/ReceiverT → 消费方的**输入**动态端口（从实例出口拉消息）。
+    if let Some(inner) = wrapped_type(ty, "DynPorts") {
+        if type_is(inner, "Sender") || wrapped_type(inner, "SenderT").is_some() {
+            return Some(PortKind::OutputDyn);
+        }
+        if type_is(inner, "Receiver") || wrapped_type(inner, "ReceiverT").is_some() {
+            return Some(PortKind::InputDyn);
+        }
+    }
     if let Some(value) = dict_value(ty) {
         if type_is(value, "Receiver") || wrapped_type(value, "ReceiverT").is_some() {
             return Some(PortKind::InputDict);
@@ -185,6 +197,8 @@ pub struct PortSpec {
     /// 是否数组端口（名字后带 `[]`）。
     pub array: bool,
     pub dict: bool,
+    /// 是否**动态端口**（`name: dyn T` / `name: dyn`）——注入 `DynPorts<..>` 字段（Ch4.9a）。
+    pub is_dyn: bool,
     pub payload: Option<Type>,
 }
 
@@ -208,6 +222,7 @@ impl Parse for PortSpec {
                     name,
                     array: true,
                     dict: false,
+                    is_dyn: false,
                     payload,
                 });
             }
@@ -226,9 +241,34 @@ impl Parse for PortSpec {
                     name,
                     array: false,
                     dict: true,
+                    is_dyn: false,
                     payload,
                 });
             }
+            // ANCHOR: dyn_parse
+            // 动态端口：`name: dyn T`（T 可为模板 `T0` 或具体类型）。注入 `DynPorts<..>`（Ch4.9a）。
+            // `dyn T0`（模板）→ 无类型 `DynPorts<Sender|Receiver>`；`dyn String`（具体）→ 类型化特化。
+            if input.peek(Token![dyn]) {
+                input.parse::<Token![dyn]>()?;
+                let payload: Type = input.parse()?;
+                if matches!(
+                    payload,
+                    Type::Slice(_) | Type::Array(_) | Type::TraitObject(_)
+                ) {
+                    return Err(syn::Error::new_spanned(
+                        payload,
+                        "动态端口的消息类型仅支持标量或模板（dyn T0 / dyn String）",
+                    ));
+                }
+                return Ok(PortSpec {
+                    name,
+                    array: false,
+                    dict: false,
+                    is_dyn: true,
+                    payload: Some(payload),
+                });
+            }
+            // ANCHOR_END: dyn_parse
             let payload: Type = input.parse()?;
             if matches!(
                 payload,
@@ -236,13 +276,14 @@ impl Parse for PortSpec {
             ) {
                 return Err(syn::Error::new_spanned(
                     payload,
-                    "当前类型化端口仅支持标量，数组/动态端口协议待补齐",
+                    "当前类型化端口仅支持标量（数组用 name:[T]、字典 name:{T}、动态 name:dyn T）",
                 ));
             }
             return Ok(PortSpec {
                 name,
                 array: false,
                 dict: false,
+                is_dyn: false,
                 payload: Some(payload),
             });
         }
@@ -259,6 +300,7 @@ impl Parse for PortSpec {
             name,
             array,
             dict: false,
+            is_dyn: false,
             payload: None,
         })
     }
@@ -297,7 +339,15 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
                 .as_ref()
                 .filter(|ty| template_index(ty).is_none());
             // 数组端口 → Vec<Receiver>（一名多端，扇入）；标量端口 → 单个 Receiver。
-            let ty: Type = if spec.array {
+            // 动态输入端口 → `DynPorts<ReceiverT<T>>`（具体载荷）/ `DynPorts<Receiver>`（模板，无类型）。
+            let ty: Type = if spec.is_dyn {
+                match concrete_payload {
+                    Some(payload) => {
+                        parse_quote!(flow_rs::dyn_ports::DynPorts<flow_rs::channel::ReceiverT<#payload>>)
+                    }
+                    None => parse_quote!(flow_rs::dyn_ports::DynPorts<flow_rs::channel::Receiver>),
+                }
+            } else if spec.array {
                 let endpoint: Type = match concrete_payload {
                     Some(payload) => parse_quote!(flow_rs::channel::ReceiverT<#payload>),
                     None => parse_quote!(flow_rs::channel::Receiver),
@@ -366,7 +416,15 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
                 .as_ref()
                 .filter(|ty| template_index(ty).is_none());
             // 数组端口 → Vec<Sender>（一名多端，扇出）；标量端口 → Option<Sender>。
-            let ty: Type = if spec.array {
+            // 动态输出端口 → `DynPorts<SenderT<T>>`（具体载荷）/ `DynPorts<Sender>`（模板，无类型）。
+            let ty: Type = if spec.is_dyn {
+                match concrete_payload {
+                    Some(payload) => {
+                        parse_quote!(flow_rs::dyn_ports::DynPorts<flow_rs::channel::SenderT<#payload>>)
+                    }
+                    None => parse_quote!(flow_rs::dyn_ports::DynPorts<flow_rs::channel::Sender>),
+                }
+            } else if spec.array {
                 let endpoint: Type = match concrete_payload {
                     Some(payload) => parse_quote!(flow_rs::channel::SenderT<#payload>),
                     None => parse_quote!(flow_rs::channel::Sender),
@@ -410,6 +468,9 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
                     Some(PortKind::TypedOutput) => outs.push((id.clone(), PortKind::TypedOutput)),
                     Some(PortKind::OutputArray) => outs.push((id.clone(), PortKind::OutputArray)),
                     Some(PortKind::OutputDict) => outs.push((id.clone(), PortKind::OutputDict)),
+                    // 动态端口（输入/输出）都持一张实例缓存，close 时 evict 掉所有实例端点。
+                    Some(PortKind::OutputDyn) => outs.push((id.clone(), PortKind::OutputDyn)),
+                    Some(PortKind::InputDyn) => outs.push((id.clone(), PortKind::InputDyn)),
                     _ => {}
                 }
             }
@@ -428,15 +489,49 @@ fn output_fields(input: &DeriveInput) -> Vec<(Ident, PortKind)> {
 pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
     let (ig, tg, wc) = input.generics.split_for_impl();
-    let closes = output_fields(input).into_iter().map(|(id, kind)| {
-        if kind == PortKind::TypedOutput {
-            quote! { self.#id = Default::default(); }
-        } else if matches!(kind, PortKind::OutputArray | PortKind::OutputDict) {
-            quote! { self.#id.clear(); } // 数组输出：清空 Vec → drop 掉每个 Sender
-        } else {
-            quote! { self.#id = None; } // 标量输出：置 None → drop 掉 Sender
+    let fields = output_fields(input);
+    let closes: Vec<_> = fields
+        .iter()
+        .map(|(id, kind)| {
+            if *kind == PortKind::TypedOutput {
+                quote! { self.#id = Default::default(); }
+            } else if matches!(kind, PortKind::OutputDyn | PortKind::InputDyn) {
+                quote! { self.#id.close(); } // 动态端口：evict 掉缓存里每份实例的端点
+            } else if matches!(kind, PortKind::OutputArray | PortKind::OutputDict) {
+                quote! { self.#id.clear(); } // 数组输出：清空 Vec → drop 掉每个 Sender
+            } else {
+                quote! { self.#id = None; } // 标量输出：置 None → drop 掉 Sender
+            }
+        })
+        .collect();
+    // ANCHOR: set_port_dynamic_gen
+    // 动态端口字段 → 生成 `set_port_dynamic` 覆盖：按端口名把 `DynPortsConfig` push 进对应字段的
+    // `DynPorts.cfg`（对标原版 `set_dyn_f`）。无动态端口的节点不生成、沿用 `Node` trait 默认 no-op。
+    let dyn_arms: Vec<_> = fields
+        .iter()
+        .filter(|(_, kind)| matches!(kind, PortKind::OutputDyn | PortKind::InputDyn))
+        .map(|(id, _)| {
+            let key = LitStr::new(&id.to_string(), id.span());
+            quote! { #key => self.#id.push(port_info.name.clone(), config), }
+        })
+        .collect();
+    let set_port_dynamic = if dyn_arms.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            fn set_port_dynamic(
+                &mut self,
+                port_info: &flow_rs::config::interlayer::PortInfo,
+                config: flow_rs::dyn_ports::DynPortsConfig,
+            ) {
+                match port_info.name.as_str() {
+                    #( #dyn_arms )*
+                    _ => {}
+                }
+            }
         }
-    });
+    };
+    // ANCHOR_END: set_port_dynamic_gen
     quote! {
         impl #ig Node for #name #tg #wc {
             fn close(&mut self) {
@@ -445,6 +540,7 @@ pub fn expand_derive_node(input: &DeriveInput) -> TokenStream2 {
             fn is_all_input_closed(&self) -> bool {
                 self.input_closed
             }
+            #set_port_dynamic
         }
     }
 }
@@ -574,6 +670,7 @@ pub fn expand_methods(mut item: ItemImpl) -> TokenStream2 {
 fn message_type(ty: &Type) -> TokenStream2 {
     let ty = dict_value(ty)
         .or_else(|| wrapped_type(ty, "Vec"))
+        .or_else(|| wrapped_type(ty, "DynPorts"))
         .unwrap_or(ty);
     match wrapped_type(ty, "ReceiverT").or_else(|| wrapped_type(ty, "SenderT")) {
         Some(payload) => quote!(flow_rs::config::interlayer::MsgTypeId::of::<#payload>()),
@@ -592,6 +689,8 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
     let mut output_array: Vec<bool> = Vec::new();
     let mut input_dict = Vec::new();
     let mut output_dict = Vec::new();
+    let mut input_dyn: Vec<bool> = Vec::new();
+    let mut output_dyn: Vec<bool> = Vec::new();
     let mut tagged_inits = Vec::new();
     let mut has_dict = false;
     let mut input_types = Vec::new();
@@ -619,6 +718,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 output_names.push(LitStr::new(&id.to_string(), id.span()));
                 output_array.push(is_array);
                 output_dict.push(port_kind(&f.ty) == Some(PortKind::OutputDict));
+                output_dyn.push(false);
                 output_types.push(match field_message_type(f) {
                     Ok(ty) => ty,
                     Err(error) => return error.to_compile_error(),
@@ -639,6 +739,7 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 input_names.push(LitStr::new(&id.to_string(), id.span()));
                 input_array.push(is_array);
                 input_dict.push(port_kind(&f.ty) == Some(PortKind::InputDict));
+                input_dyn.push(false);
                 input_types.push(match field_message_type(f) {
                     Ok(ty) => ty,
                     Err(error) => return error.to_compile_error(),
@@ -649,6 +750,29 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                 } else {
                     quote! { ins.remove(0).remove(0).into() } // 标量：取组里唯一的 Receiver
                 }
+            } else if port_kind(&f.ty) == Some(PortKind::OutputDyn) {
+                // 动态输出端口：登记进 OUTPUTS 名表（4.9b 靠并行的 OUTPUT_DYN 定位它），但**不**从
+                // outs 消费——字段是一张空的 `DynPorts`，运行期由 `set_port_dynamic` 注入 cfg。
+                output_names.push(LitStr::new(&id.to_string(), id.span()));
+                output_array.push(false);
+                output_dict.push(false);
+                output_dyn.push(true);
+                output_types.push(match field_message_type(f) {
+                    Ok(ty) => ty,
+                    Err(error) => return error.to_compile_error(),
+                });
+                quote! { Default::default() }
+            } else if port_kind(&f.ty) == Some(PortKind::InputDyn) {
+                // 动态输入端口：对偶地登记进 INPUTS 名表 + INPUT_DYN，同样不从 ins 消费。
+                input_names.push(LitStr::new(&id.to_string(), id.span()));
+                input_array.push(false);
+                input_dict.push(false);
+                input_dyn.push(true);
+                input_types.push(match field_message_type(f) {
+                    Ok(ty) => ty,
+                    Err(error) => return error.to_compile_error(),
+                });
+                quote! { Default::default() }
             } else if *id == "input_closed" {
                 quote! { false }
             } else {
@@ -684,6 +808,8 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
                         .map(|p| p.endpoint.into())
                         .collect())
                 }
+                // 动态端口不消费 tagged 端点，与 `build` 一致走 Default::default()。
+                Some(PortKind::InputDyn | PortKind::OutputDyn) => init.clone(),
                 None => init.clone(),
             };
             tagged_inits.push(quote! { #id: #tagged });
@@ -719,6 +845,8 @@ pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
             const OUTPUT_ARRAY: &'static [bool] = &[ #( #output_array ),* ];
             const INPUT_DICT: &'static [bool] = &[#(#input_dict),*];
             const OUTPUT_DICT: &'static [bool] = &[#(#output_dict),*];
+            const INPUT_DYN: &'static [bool] = &[#(#input_dyn),*];
+            const OUTPUT_DYN: &'static [bool] = &[#(#output_dyn),*];
             #tagged_method
             fn input_types() -> Vec<flow_rs::config::interlayer::MsgTypeId> {
                 vec![#(#input_types),*]
@@ -776,6 +904,8 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
                 input_dict: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_DICT,
                 output_dict: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_DICT,
                 output_array: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_ARRAY,
+                input_dyn: <#ty as flow_rs::registry::BuildFromPorts>::INPUT_DYN,
+                output_dyn: <#ty as flow_rs::registry::BuildFromPorts>::OUTPUT_DYN,
                 input_types: <#ty as flow_rs::registry::BuildFromPorts>::input_types,
                 output_types: <#ty as flow_rs::registry::BuildFromPorts>::output_types,
                 ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
@@ -819,6 +949,7 @@ mod tests {
             name: id(s),
             array: false,
             dict: false,
+            is_dyn: false,
             payload: None,
         }
     }
@@ -829,6 +960,7 @@ mod tests {
             name: id(s),
             array: true,
             dict: false,
+            is_dyn: false,
             payload: None,
         }
     }
