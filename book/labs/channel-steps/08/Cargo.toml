@@ -8,5 +8,5 @@ exclude = ["message"]
 
 [dependencies]
 flow-message = { path = "message" }
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 thiserror = "2"

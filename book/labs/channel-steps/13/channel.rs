@@ -1,0 +1,557 @@
+//! flow-rs · channel —— 承载 `SealedEnvelope` 的异步通道（重写版）。
+//!
+//! 基于 Tokio 队列，共享接收端用异步 Mutex 串行取出消息。
+//! Sender 与 Receiver 均可克隆；多个消费者竞争消息，每条仅交给一个消费者。
+//! flush epoch、类型转换和统计协议仍需继续对齐原版。
+
+mod conversion;
+pub use conversion::{add_cvt_func_impl, guess_channel_type, CvtF};
+mod typed;
+pub use typed::{ReceiverT, SenderT};
+
+use crate::config::interlayer::MsgTypeId;
+use crate::error::{Error, Result};
+use flow_message::{Envelope, SealedEnvelope};
+use std::sync::Arc;
+use tokio::sync::{mpsc, watch, Mutex};
+
+/// 持久关闭状态与入队临界区；锁内不执行 await 或用户转换函数。
+struct CloseState {
+    gate: std::sync::Mutex<()>,
+    closed: watch::Sender<bool>,
+}
+impl CloseState {
+    fn new() -> Self {
+        Self {
+            gate: std::sync::Mutex::new(()),
+            closed: watch::channel(false).0,
+        }
+    }
+    fn close(&self) {
+        let _guard = self.gate.lock().unwrap();
+        self.closed.send_replace(true);
+    }
+    fn is_closed(&self) -> bool {
+        *self.closed.borrow()
+    }
+    async fn wait(&self) {
+        let mut state = self.closed.subscribe();
+        state
+            .wait_for(|closed| *closed)
+            .await
+            .expect("close state retained");
+    }
+}
+
+/// 通道发送端。可 `Clone`（多生产者扇入）。
+/// Sending half; `Clone` for multi-producer fan-in.
+#[derive(Clone, Default)]
+pub struct Sender {
+    inner: SendImpl,
+    close_state: Option<Arc<CloseState>>,
+    channel_type: MsgTypeId,
+    conversion: Option<CvtF>,
+}
+
+/// 克隆共享同一队列，竞争接收，不复制消息。
+#[derive(Clone, Default)]
+pub struct Receiver {
+    inner: Option<Arc<Mutex<RecvImpl>>>,
+    close_state: Option<Arc<CloseState>>,
+    channel_type: MsgTypeId,
+    conversion: Option<CvtF>,
+}
+
+#[derive(Clone, Default)]
+enum SendImpl {
+    #[default]
+    Unconnected,
+    Bounded(mpsc::Sender<SealedEnvelope>),
+    Unbounded(mpsc::UnboundedSender<SealedEnvelope>),
+}
+enum RecvImpl {
+    Bounded(mpsc::Receiver<SealedEnvelope>),
+    Unbounded(mpsc::UnboundedReceiver<SealedEnvelope>),
+}
+
+/// 与原版 ChannelStorage 一致：正容量有界，0 表示无界而非零容量会合。
+pub fn channel(capacity: usize) -> (Sender, Receiver) {
+    channel_with_type(capacity, MsgTypeId::Any)
+}
+
+/// 创建带通道类型描述的队列。描述不执行转换或验证实际消息载荷。
+/// 这是后续 ChannelStorage/类型推断的装配入口，不能替代 CVT_VTABLE。
+pub fn channel_with_type(capacity: usize, channel_type: MsgTypeId) -> (Sender, Receiver) {
+    let close_state = Arc::new(CloseState::new());
+    if capacity == 0 {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Sender {
+                inner: SendImpl::Unbounded(tx),
+                close_state: Some(close_state.clone()),
+                channel_type,
+                conversion: None,
+            },
+            Receiver {
+                inner: Some(Arc::new(Mutex::new(RecvImpl::Unbounded(rx)))),
+                close_state: Some(close_state),
+                channel_type,
+                conversion: None,
+            },
+        )
+    } else {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            Sender {
+                inner: SendImpl::Bounded(tx),
+                close_state: Some(close_state.clone()),
+                channel_type,
+                conversion: None,
+            },
+            Receiver {
+                inner: Some(Arc::new(Mutex::new(RecvImpl::Bounded(rx)))),
+                close_state: Some(close_state),
+                channel_type,
+                conversion: None,
+            },
+        )
+    }
+}
+
+/// 端口声明类型与底层通道类型可以不同，转换表将来负责衔接。
+// ANCHOR: type_info_trait
+pub trait TypeInfo {
+    fn port_tid(&self) -> MsgTypeId;
+    fn chan_tid(&self) -> MsgTypeId;
+}
+// ANCHOR_END: type_info_trait
+
+impl TypeInfo for Sender {
+    fn port_tid(&self) -> MsgTypeId {
+        MsgTypeId::Any
+    }
+    fn chan_tid(&self) -> MsgTypeId {
+        self.channel_type
+    }
+}
+impl TypeInfo for Receiver {
+    fn port_tid(&self) -> MsgTypeId {
+        MsgTypeId::Any
+    }
+    fn chan_tid(&self) -> MsgTypeId {
+        self.channel_type
+    }
+}
+
+impl Sender {
+    /// 关闭所有克隆共享的队列，已入队消息仍可排空。
+    pub fn close(&self) {
+        if let Some(state) = &self.close_state {
+            state.close();
+        }
+    }
+    /// 缓存端口类型 → 通道类型的直接转换，与原版装配方向一致。
+    #[doc(hidden)]
+    pub fn with_type(&mut self, port_type: &MsgTypeId) {
+        self.conversion = conversion::lookup(*port_type, self.chan_tid());
+    }
+
+    /// 默认端点尚未接到队列；与已接线后关闭不同。
+    pub fn is_none(&self) -> bool {
+        matches!(self.inner, SendImpl::Unconnected)
+    }
+
+    /// 发送一个已封箱的信封（未类型化）。通道关闭 → `Err(ChannelClosed)`。
+    /// Send an already-sealed envelope (untyped).
+    pub async fn send_any(&self, msg: SealedEnvelope) -> Result<()> {
+        if self.is_none() {
+            return Ok(());
+        }
+        let msg = convert(self.conversion, msg).await?;
+        let state = self.close_state.as_ref().expect("connected channel");
+        match &self.inner {
+            SendImpl::Unconnected => Ok(()),
+            SendImpl::Bounded(tx) => {
+                let permit = tokio::select! {
+                    biased;
+                    _ = state.wait() => return Err(Error::ChannelClosed),
+                    permit = tx.reserve() => permit.map_err(|_| Error::ChannelClosed)?,
+                };
+                let _guard = state.gate.lock().unwrap();
+                if state.is_closed() {
+                    return Err(Error::ChannelClosed);
+                }
+                permit.send(msg);
+                Ok(())
+            }
+            SendImpl::Unbounded(tx) => {
+                let _guard = state.gate.lock().unwrap();
+                if state.is_closed() {
+                    return Err(Error::ChannelClosed);
+                }
+                tx.send(msg).map_err(|_| Error::ChannelClosed)
+            }
+        }
+    }
+
+    /// 发送一个类型化信封：内部先 `seal` 再走 `send_any`。
+    /// 载荷 `T` 须可 `Clone`——封箱后的 `SealedEnvelope` 要支持类型擦除克隆（广播用），
+    /// 这条约束由 `Envelope::seal` 一路传导到这里（见 flow-message envelope.rs）。
+    /// Send a typed envelope; seals then delegates to `send_any`. `T: Clone` because
+    /// sealed envelopes must be cloneable under type erasure (for broadcast).
+    pub async fn send<T>(&self, msg: Envelope<T>) -> Result<()>
+    where
+        T: 'static + Send + Clone,
+    {
+        self.send_any(msg.seal()).await
+    }
+
+    /// 通道是否已关闭（所有 `Receiver` 均已 drop）。
+    pub fn is_closed(&self) -> bool {
+        if self
+            .close_state
+            .as_ref()
+            .is_some_and(|state| state.is_closed())
+        {
+            return true;
+        }
+        match &self.inner {
+            SendImpl::Unconnected => true,
+            SendImpl::Bounded(tx) => tx.is_closed(),
+            SendImpl::Unbounded(tx) => tx.is_closed(),
+        }
+    }
+}
+
+/// 提前关闭时保留已收到的部分批次，调用者决定如何处理。
+pub enum BatchRecvError<T> {
+    Closed(Vec<T>),
+}
+impl<T> std::fmt::Debug for BatchRecvError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BatchRecvError::Closed")
+    }
+}
+
+impl Receiver {
+    /// 关闭共享队列；不丢弃关闭前已入队的消息。
+    pub fn close(&self) {
+        if let Some(state) = &self.close_state {
+            state.close();
+        }
+    }
+    /// 缓存通道类型 → 端口类型的直接转换。
+    #[doc(hidden)]
+    pub fn with_type(&mut self, port_type: &MsgTypeId) {
+        self.conversion = conversion::lookup(self.chan_tid(), *port_type);
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    // ANCHOR: timed_receive
+    /// 原版 try_recv 是限时等待；超时为 Ok(None)，关闭为 Err。
+    pub async fn try_recv_any(&self, dur: std::time::Duration) -> Result<Option<SealedEnvelope>> {
+        tokio::select! {
+            _ = tokio::time::sleep(dur) => Ok(None),
+            message = self.recv_any() => message.map(Some),
+        }
+    }
+
+    pub async fn try_recv<T: Send + Clone + 'static>(
+        &self,
+        dur: std::time::Duration,
+    ) -> Result<Option<Envelope<T>>> {
+        self.try_recv_any(dur).await.map(|item| {
+            item.map(|mut item| {
+                item.downcast_mut::<Envelope<T>>()
+                    .expect("type error when downcast in receiver")
+                    .take()
+            })
+        })
+    }
+    // ANCHOR_END: timed_receive
+
+    // ANCHOR: batch_receive
+    /// n 是累计权重阈值，不是信封数量。超时返回部分成功结果。
+    pub async fn batch_recv_any(
+        &self,
+        n: usize,
+        dur: std::time::Duration,
+    ) -> std::result::Result<Vec<SealedEnvelope>, BatchRecvError<SealedEnvelope>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let timer = tokio::time::sleep(dur);
+        tokio::pin!(timer);
+        let mut batch = Vec::with_capacity(n);
+        let mut weight = 0;
+        loop {
+            tokio::select! {
+                _ = &mut timer => return Ok(batch),
+                message = self.recv_any() => match message {
+                    Ok(message) => {
+                        weight += message.info().weight.unwrap_or(1);
+                        batch.push(message);
+                        if weight >= n { return Ok(batch); }
+                    }
+                    Err(_) => return Err(BatchRecvError::Closed(batch)),
+                }
+            }
+        }
+    }
+
+    pub async fn batch_recv<T: Send + Clone + 'static>(
+        &self,
+        n: usize,
+        dur: std::time::Duration,
+    ) -> std::result::Result<Vec<Envelope<T>>, BatchRecvError<Envelope<T>>> {
+        let convert = |items: Vec<SealedEnvelope>| {
+            items
+                .into_iter()
+                .map(|mut item| {
+                    item.downcast_mut::<Envelope<T>>()
+                        .expect("type error when downcast")
+                        .take()
+                })
+                .collect()
+        };
+        self.batch_recv_any(n, dur)
+            .await
+            .map(convert)
+            .map_err(|error| match error {
+                BatchRecvError::Closed(items) => BatchRecvError::Closed(convert(items)),
+            })
+    }
+    // ANCHOR_END: batch_receive
+
+    /// 收一个已封箱的信封（未类型化）。所有 `Sender` 均 drop 且队列排空 →
+    /// `Err(ChannelClosed)`。/ Receive an untyped sealed envelope.
+    pub async fn recv_any(&self) -> Result<SealedEnvelope> {
+        let inner = self.inner.as_ref().ok_or(Error::ChannelClosed)?;
+        let msg = {
+            let mut receiver = inner.lock().await;
+            let state = self.close_state.as_ref().expect("connected channel");
+            match &mut *receiver {
+                RecvImpl::Bounded(rx) => tokio::select! {
+                    biased;
+                    _ = state.wait() => { rx.close(); rx.recv().await },
+                    message = rx.recv() => message,
+                },
+                RecvImpl::Unbounded(rx) => tokio::select! {
+                    biased;
+                    _ = state.wait() => { rx.close(); rx.recv().await },
+                    message = rx.recv() => message,
+                },
+            }
+            .ok_or(Error::ChannelClosed)?
+        };
+        convert(self.conversion, msg).await
+    }
+
+    /// 收一个类型化信封：`recv_any` 后把类型 `downcast` 回来（Ch1.3 的安全实现）。
+    /// 类型不符 → `Err(TypeMismatch)`。
+    /// Receive and downcast back to `Envelope<T>`; wrong type → `TypeMismatch`.
+    pub async fn recv<T>(&self) -> Result<Envelope<T>>
+    where
+        T: 'static + Send,
+    {
+        let mut sealed = self.recv_any().await?;
+        // 认领回 Envelope<T> 的 &mut，再 take() 出一个拥有所有权的信封。
+        match sealed.downcast_mut::<Envelope<T>>() {
+            Some(e) => Ok(e.take()),
+            None => Err(Error::TypeMismatch),
+        }
+    }
+}
+
+// ── 测试：契约钉死（红→绿）──
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conversion_keeps_sequence() {
+        #[derive(Clone)]
+        struct Input(u32);
+        #[derive(Clone)]
+        struct Wire(u32);
+        #[derive(Clone)]
+        struct Output(u32);
+        fn encode(mut message: SealedEnvelope) -> SealedEnvelope {
+            let message = message.downcast_mut::<Envelope<Input>>().unwrap();
+            let value = message.unpack().0;
+            message.repack(Wire(value + 1)).seal()
+        }
+        fn decode(mut message: SealedEnvelope) -> SealedEnvelope {
+            let message = message.downcast_mut::<Envelope<Wire>>().unwrap();
+            let value = message.unpack().0;
+            message.repack(Output(value * 2)).seal()
+        }
+        add_cvt_func_impl(MsgTypeId::of::<Input>(), MsgTypeId::of::<Wire>(), encode);
+        add_cvt_func_impl(MsgTypeId::of::<Wire>(), MsgTypeId::of::<Output>(), decode);
+        let (sender, receiver) = channel_with_type(1, MsgTypeId::of::<Wire>());
+        let sender: SenderT<Input> = sender.into();
+        let receiver: ReceiverT<Output> = receiver.into();
+        let mut message = Envelope::new(Input(10));
+        message.info_mut().partial_id = Some(42);
+        sender.send(message).await.unwrap();
+        let mut message = receiver.recv().await.unwrap();
+        assert_eq!(message.info().partial_id, Some(42));
+        assert_eq!(message.unpack().0, 22);
+    }
+
+    #[test]
+    fn wrapper_does_not_relabel_queue() {
+        let (sender, receiver) = channel_with_type(1, MsgTypeId::of::<String>());
+        let sender: SenderT<u32> = sender.into();
+        let receiver: ReceiverT<u32> = receiver.into();
+        assert_eq!(sender.port_tid(), MsgTypeId::of::<u32>());
+        assert_eq!(receiver.port_tid(), MsgTypeId::of::<u32>());
+        assert_eq!(sender.chan_tid(), MsgTypeId::of::<String>());
+        assert_eq!(receiver.chan_tid(), MsgTypeId::of::<String>());
+    }
+
+    #[tokio::test]
+    async fn typed_roundtrip_preserves_metadata() {
+        let (tx, rx) = channel(1);
+        let mut message = Envelope::new(7u32);
+        message.info_mut().to_addr = Some(42);
+        tx.send(message).await.unwrap();
+        let mut received = rx.recv::<u32>().await.unwrap();
+        assert_eq!(received.info().to_addr, Some(42));
+        assert_eq!(received.unpack(), 7);
+    }
+
+    #[tokio::test]
+    async fn untyped_roundtrip() {
+        let (tx, rx) = channel(1);
+        tx.send_any(Envelope::new(9u32).seal()).await.unwrap();
+        let mut message = rx.recv_any().await.unwrap();
+        assert_eq!(message.downcast_mut::<Envelope<u32>>().unwrap().unpack(), 9);
+    }
+
+    #[tokio::test]
+    async fn wrong_type_consumes_only_that_message() {
+        let (tx, rx) = channel(2);
+        tx.send(Envelope::new(1u32)).await.unwrap();
+        tx.send(Envelope::new(2i32)).await.unwrap();
+        assert!(matches!(rx.recv::<i32>().await, Err(Error::TypeMismatch)));
+        assert_eq!(rx.recv::<i32>().await.unwrap().unpack(), 2);
+    }
+
+    #[tokio::test]
+    async fn last_sender_drop_drains_before_close() {
+        let (tx, rx) = channel(1);
+        let other = tx.clone();
+        drop(tx);
+        other.send(Envelope::new(3u32)).await.unwrap();
+        drop(other);
+        assert_eq!(rx.recv::<u32>().await.unwrap().unpack(), 3);
+        assert!(matches!(rx.recv_any().await, Err(Error::ChannelClosed)));
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_rejects_send() {
+        let (tx, rx) = channel(1);
+        drop(rx);
+        assert!(matches!(
+            tx.send(Envelope::new(1u32)).await,
+            Err(Error::ChannelClosed)
+        ));
+    }
+    #[tokio::test]
+    async fn zero_capacity_is_unbounded() {
+        let (sender, receiver) = channel(0);
+        for value in 0..10u32 {
+            sender.send(Envelope::new(value)).await.unwrap();
+        }
+        drop(sender);
+        for value in 0..10u32 {
+            assert_eq!(receiver.recv::<u32>().await.unwrap().unpack(), value);
+        }
+        assert!(matches!(
+            receiver.recv_any().await,
+            Err(Error::ChannelClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn receiver_clones_share_one_queue() {
+        let (sender, first) = channel(0);
+        let second = first.clone();
+        sender.send(Envelope::new(1u32)).await.unwrap();
+        sender.send(Envelope::new(2u32)).await.unwrap();
+        drop(sender);
+        assert_eq!(first.recv::<u32>().await.unwrap().unpack(), 1);
+        assert_eq!(second.recv::<u32>().await.unwrap().unpack(), 2);
+        assert!(matches!(first.recv_any().await, Err(Error::ChannelClosed)));
+        assert!(matches!(second.recv_any().await, Err(Error::ChannelClosed)));
+    }
+    #[tokio::test]
+    async fn timeout_preserves_receiver_and_batch_returns_partial_on_close() {
+        use std::time::Duration;
+        let (sender, receiver) = channel(0);
+        assert!(receiver
+            .try_recv_any(Duration::from_millis(1))
+            .await
+            .unwrap()
+            .is_none());
+        let mut message = Envelope::new(7u32);
+        message.info_mut().weight = Some(2);
+        sender.send(message).await.unwrap();
+        drop(sender);
+        match receiver.batch_recv::<u32>(3, Duration::from_secs(1)).await {
+            Err(BatchRecvError::Closed(mut batch)) => {
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].unpack(), 7);
+            }
+            _ => panic!("expected partial batch on close"),
+        }
+    }
+    #[tokio::test]
+    async fn typed_wrapper_preserves_queue_and_metadata() {
+        let (sender, receiver) = channel(1);
+        let sender: SenderT<u32> = sender.into();
+        let receiver: ReceiverT<u32> = receiver.into();
+        let mut message = Envelope::new(7u32);
+        message.info_mut().partial_id = Some(42);
+        sender.send(message).await.unwrap();
+        let mut message = receiver.recv().await.unwrap();
+        assert_eq!(message.info().partial_id, Some(42));
+        assert_eq!(message.unpack(), 7);
+    }
+    #[tokio::test]
+    async fn default_endpoints_have_no_queue() {
+        let sender = Sender::default();
+        let receiver = Receiver::default();
+        assert!(sender.is_none());
+        assert!(receiver.is_none());
+        sender.send(Envelope::new(7u32)).await.unwrap();
+        assert!(matches!(
+            receiver.recv_any().await,
+            Err(Error::ChannelClosed)
+        ));
+        let (sender, receiver) = channel(1);
+        assert!(!sender.is_none());
+        assert!(!receiver.is_none());
+        let typed: SenderT<u32> = SenderT::default();
+        assert!(typed.is_none());
+    }
+}
+
+async fn convert(function: Option<CvtF>, msg: SealedEnvelope) -> Result<SealedEnvelope> {
+    // DummyEnvelope 属于控制协议，不送入业务转换器；完整 flush 协议仍待迁移。
+    if msg.is::<flow_message::DummyEnvelope>() {
+        return Ok(msg);
+    }
+    match function {
+        None => Ok(msg),
+        // 原版 rt::JoinHandle 的 Future::poll 对 Tokio JoinError 调用 unwrap，
+        // 因此转换任务 panic 会让等待它的任务继续 panic，而非业务 Err。
+        Some(function) => Ok(tokio::task::spawn_blocking(move || function(msg))
+            .await
+            .unwrap()),
+    }
+}

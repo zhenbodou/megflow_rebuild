@@ -1,85 +1,85 @@
-# Ch1.4c 类型化与默认端点
+# Ch1.4c 第九、十步：类型包装与默认端点
 
-前置知识是泛型、PhantomData、Deref，以及上一课的共享队列。本课为已有端点添加类型包装，再明确未接线端点的行为。
-
-完成标准：能独立实现 SenderT/ReceiverT，并区分默认端点与实际创建的队列。
+继续上一章第八步的 flow-rs 工程。本章不增加第三方依赖，也不创建 config 或转换表。先把“每次调用都指定类型”变成“端口本身记住类型”，再处理尚未接线的端口。
 
 <!-- toc -->
 
-## 类型化端点：把类型写在端口上
+## 第九步：把类型参数搬到端口上
 
-前面每次接收都写 `receiver.recv::<u32>()`。原版还提供 `ReceiverT<T>`、`SenderT<T>`，
-让端口本身固定类型。例如：
+现在你会写 `receiver.recv::<u32>()`。如果一个节点永远只收 u32，每次重复指定容易写错；我们希望先声明 `ReceiverT<u32>`，以后只写 recv()。
 
-```rust,ignore
-let (sender, receiver) = channel(0);
-let sender: SenderT<u32> = sender.into();
-let receiver: ReceiverT<u32> = receiver.into();
-sender.send(Envelope::new(7)).await.unwrap();
-let mut envelope = receiver.recv().await.unwrap();
-assert_eq!(envelope.unpack(), 7);
+PhantomData 是标准库提供的零大小标记。包装中并不保存一个 T 值，但这个类型参数仍影响方法签名和 Send/Sync 等自动 trait 推导。先记住它负责“这个类型与 T 有关系”，不负责实际校验队列内容。
+
+From 则定义怎样把已有端点移动进包装；into 由目标变量类型选择 From 实现。这个过程不创建队列，也不接收消息。Deref 和 DerefMut 允许借用内部端点，复用它已经写好的方法；它们不会复制端点。
+
+### 本步修改清单
+
+Cargo.toml、src/lib.rs、src/error.rs 和 message 保持第八步不变。**替换 src/channel.rs，新增 src/channel/typed.rs**。Rust 允许 channel.rs 与 channel/ 目录同时存在；channel.rs 中的 `mod typed;` 正是读取子目录下的 typed.rs。
+
+完整 **src/channel.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/09/channel.rs}}
 ```
 
-变量上的 u32 决定 send/recv 的载荷类型。这是类型推导，不是宏替你补字符串。
-当前完整包装实现如下：
+这一文件的原有收发代码保持第八步逻辑，只增加模块声明、公开重导出及一项测试。不要把最终仓库的 channel.rs 放进来，否则会出现尚未实现的类型信息与转换依赖。
 
-```rust,ignore
-{{#include ../../../code/flow-rs/src/channel/typed.rs}}
+完整 **src/channel/typed.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/09/typed.rs}}
 ```
 
-按三层理解：
+### 沿调用顺序读实现
 
-1. 元组结构体保存原 Sender/Receiver 与 `PhantomData<T>`。PhantomData 不存储真实载荷，
-   但告诉编译器此包装与 T 有类型关系，参与 trait 和自动 Send/Sync 的检查。
-2. From 接收原端点的所有权，into 根据目标变量类型选择 From 实现。它不新建通道，
-   不复制队列，也不读取队列中的消息。
-3. 固有 send/recv 方法固定 T；Deref 则让包装继续使用底层 send_any/recv_any 等接口。
-   因此它不是禁止所有异类型输入的封闭容器。未类型化发送仍可能把其他类型送入队列。
+先看 `SenderT<T>(Sender, PhantomData<T>)`：这是元组结构体，用 `.0` 访问底层端点，`.1` 是标记。From 的参数按值接收 Sender，所以包装后旧绑定不能继续使用；若调用方确实需要两份句柄，应先显式 clone。
 
-类型化 recv 沿用原版下转型失败 panic 的行为。它不等于当前未类型化 `recv::<T>` 的
-TypeMismatch 返回；这处错误模型差异仍应在完整 API 对照中跟踪。批量和限时接口
-复用前面实现，不重复编写权重循环或计时逻辑。
+再看 send：类型参数 T 现在来自 impl，而不是每次调用重新选择。它仍委托上一课实现的 Sender::send。接收端也委托 recv_any，但按原版类型化入口的约定，认领错误时 panic；它与普通 `recv::<T>` 返回 TypeMismatch 的接口不同，不要把两者混为一个错误模型。
 
-```bash
-cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_endpoints --locked
+为什么仍写 Send、Clone、'static？封箱需要这些能力；引入包装不会消除底层约束。Deref 的 Target 指定被借用的类型，返回 `&self.0`；DerefMut 返回独占借用 `&mut self.0`。
+
+最后读限时和批量方法：Duration 来自标准库；BatchRecvError 是上一章已写的枚举；这些方法继续调用底层已实现的方法，不需要重新写计时循环。本步 From 没有 with_type 调用，因为类型身份和转换表还没实现，下一章才加入。
+
+### 运行与排错
+
+在当前 flow-rs 目录运行 `cargo test --offline`。预期 **9 项测试**通过：原来八项不丢失，新测试验证类型包装后得到 7，partial_id 仍为 Some(42)。
+
+把新测试发送的 u32 改成 String，编译应在 send 调用处指出参数类型不匹配。恢复后再尝试通过 Deref 暴露的 send_any 发送不同类型：这条底层接口仍可绕过包装的泛型限制，接收时才发现错误。因此类型包装方便业务调用，并不是一个禁止所有异类型消息的密封容器。
+
+独立练习：将一对端口包装为 String 类型，发送一个字符串，并断言序号保留。不要新建第二条队列来实现 From，否则原来的两端会失去联系。
+
+## 第十步：没有接线也能构造端点
+
+后面创建节点结构体时，图还没有给它连接真实队列。因此需要 Default 构造“尚未接线”的端点。默认端点与真实创建但随后关闭的队列不是同一状态。
+
+原版协议规定：未接线发送端丢弃消息并返回成功；未接线接收端立即返回关闭错误。不要凭直觉把发送改成报错，默认输出本来就允许没有下游。
+
+### 本步修改清单
+
+**替换 src/channel.rs 和 src/channel/typed.rs**，其他所有文件不变。没有新依赖。
+
+完整 **src/channel.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/10/channel.rs}}
 ```
 
-三个测试验证类型推导、限时与部分批次、克隆后的共享队列、通过 Deref 调用未类型化
-操作，以及错误载荷的失败行为。
+完整 **src/channel/typed.rs**：
 
-原版 From 还查询 CVT_VTABLE，以端口类型和通道类型查找转换函数。当前尚未实现
-该转换表，TypeInfo 在 [下一课](ch04d-type-conversion.md) 补齐，完整类型推断仍缺失；默认未接线端点见下一节。因此这些包装只是
-类型化端口宏的基础，不能把 From 可用说成跨类型转换已完成。
-
-练习：为什么 `SenderT<u32>` 能调用 send_any？方法查找可通过 Deref 找到 Sender 的
-方法；要设计严格禁止绕过类型检查的独立 API，应慎重决定是否提供 Deref，但这里
-迁移的是原版公开接口，不能擅自删去这一能力。
-
-## 默认未接线端点：Default 不等于新建通道
-
-原版 Sender/Receiver 支持 Default，节点可以先默认构造字段，再由图装配接线。
-默认端点没有实际队列。当前 Sender 使用 Unconnected 枚举分支，Receiver 使用
-Option 的 None 表示这一状态；调用 is_none() 可以与已接线后关闭区分。
-
-原版 sender.rs 的 send_any 在没有底层实现时直接返回 Ok(())。因此未接线输出的
-消息被丢弃，但发送不报错；接收端没有队列时则返回错误。这个行为不能根据直觉改成
-“只要 is_closed 为真，send 一定失败”。
-
-| 端点状态 | is_none | 发送结果 |
-| --- | --- | --- |
-| 默认未接线 Sender | true | 丢弃消息，Ok(()) |
-| 已接线，但接收者全释放 | false | Err(ChannelClosed) |
-| 已接线且接收者仍在 | false | 入队，可能等待有界容量 |
-
-SenderT/ReceiverT 的 Default 手工委托给底层端点，不构造 T，所以不需要 T: Default。
-这是泛型约束设计的一个实际例子：包装类型能默认构造，不代表它标记的载荷类型也必须
-默认构造。测试用未实现 Default 的空类型确认没有误加约束。
-
-```bash
-cargo test --manifest-path code/Cargo.toml -p flow-rs --test typed_endpoints --locked
+```rust
+{{#include ../../labs/channel-steps/10/typed.rs}}
 ```
 
-注意：具备默认端点并不自动让 Node/Actor 宏支持所有原版节点写法；字段识别、接线、
-TypeInfo 和生命周期仍需一起迁移。当前图装配仍校验必需端口，不会因为 Default 存在
-就自动忽略缺少接线的配置错误。
+先读枚举新增的 Unconnected 分支与 default 属性。Sender 的默认字段得到这个分支；recv 枚举也有一个不包含真实队列的默认分支。Receiver 增加 connected 标志，构造真实队列时为 true，Default 时为 false，因此 is_none 不需要异步拿锁。字段是私有的，只由默认构造和 channel 构造器设置，不让调用者随意改出矛盾状态。
 
+默认 Receiver 的 Arc 和 Mutex 只是保护一个 Unconnected 枚举，并没有底层 mpsc 队列。recv_any 对该分支得到 None，再复用之前的 ok_or 返回错误。默认 send_any 的分支返回 Ok，按值传入的消息在函数结束时释放。
+
+最后给类型包装实现 Default：把底层默认端点与 PhantomData 组合起来即可。不需要 T: Default，因为没有真的构造一个 T。
+
+### 运行与独立练习
+
+运行 `cargo test --offline`，预期 **10 项测试**通过。新测试同时检查默认两端的 is_none、默认发送成功、默认接收报错、真实队列的 is_none 为 false，以及类型化默认发送端。
+
+练习：使用一个没有实现 Default 的业务类型，构造 `SenderT<该类型>`::default()，解释为什么应当能编译。然后比较 drop 一个真实发送克隆和使用默认发送端：前者涉及共享队列的存活，后者根本没有接线。
+
+维护脚本 `python3 scripts/check_basic_channel_course.py` 从 Ch1.4 第一步一直构建到本步，连续检查十个版本。下一章才加入 MsgTypeId、TypeInfo 和转换函数注册；当前阶段任何出现这些名字却没定义它们的代码，都不应复制到这里。

@@ -17,6 +17,22 @@ with tempfile.TemporaryDirectory(prefix='megflow-message-course-') as directory:
                     '--stage', 'envelope', '--out', str(envelope)], check=True)
     assert not (envelope / 'src/algo_base').exists()
     assert not (envelope / 'src/dr.rs').exists()
+    # 在同一工程按书中顺序开发；中间步骤没有终点的集成测试和示例。
+    import shutil
+    final_source = (envelope / 'src/envelope.rs').read_text()
+    final_lib = (envelope / 'src/lib.rs').read_text()
+    shutil.rmtree(envelope / 'tests')
+    shutil.rmtree(envelope / 'examples')
+    (envelope / 'src/lib.rs').write_text((root / 'book/labs/envelope/step-lib.rs').read_text())
+    for step in ('01', '02'):
+        (envelope / 'src/envelope.rs').write_text((root / f'book/labs/envelope/step{step}.rs').read_text())
+        subprocess.run(['cargo', 'test', '--offline', '--manifest-path', str(envelope / 'Cargo.toml')], check=True, timeout=120)
+    (envelope / 'src/envelope.rs').write_text(final_source)
+    (envelope / 'src/lib.rs').write_text(final_lib)
+    (envelope / 'tests').mkdir()
+    (envelope / 'examples').mkdir()
+    for relative in ('tests/envelope_contract.rs', 'examples/first_principles.rs'):
+        shutil.copyfile(root / 'code/flow-message' / relative, envelope / relative)
     subprocess.run(['cargo', 'test', '--offline', '--manifest-path', str(envelope / 'Cargo.toml')], check=True, timeout=120)
     subprocess.run(['cargo', 'run', '--offline', '--manifest-path', str(envelope / 'Cargo.toml'),
                     '--example', 'first_principles'], check=True, timeout=120)

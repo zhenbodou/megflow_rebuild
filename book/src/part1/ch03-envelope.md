@@ -42,7 +42,67 @@ flowchart LR
     G -->|"下一个特性"| R
 ```
 
-## 3. 绿：`EnvelopeInfo` 与 `Envelope<M>`
+## 2a. 先写出两个小版本，再扩展完整信封
+
+现在开始真正写库。新建 `flow-message/src` 目录，后续命令都在 flow-message 目录运行。前面的 red.rs 可以留在练习目录，它不属于这个库。
+
+### 第一步：只保存和取出一个值
+
+这一版只回答一个问题：String 怎么从信封里移出来，原信封又如何表示“已经取走”？暂时不加入 Arc、Any 或动态分发。
+
+创建 **Cargo.toml**，完整内容：
+
+```toml
+{{#include ../../labs/envelope/Cargo.toml}}
+```
+
+package 名称定义这个库叫什么；edition 选择 Rust 2021 语言规则；空的 workspace 使这个目录独立，不隐式依赖外面的项目。没有 dependencies 表，因为第一版只使用标准库。
+
+创建 **src/lib.rs**，完整内容：
+
+```rust
+{{#include ../../labs/envelope/step-lib.rs}}
+```
+
+`pub mod envelope;` 让编译器读取同目录下的 envelope.rs；`pub use` 再把其中的 Envelope 公开到库根路径，所以调用者以后可写 `flow_message::Envelope`。这不是创建第二份类型。
+
+创建 **src/envelope.rs**，完整内容：
+
+```rust
+{{#include ../../labs/envelope/step01.rs}}
+```
+
+按写代码的顺序理解：先用 struct 定义盒子，它的 message 字段是 `Option<M>`。M 是类型参数，意味着同一段实现可以装 String 或整数。new 把传入值移动进 Some；unpack 借用整个盒子，使用 take 移出内部值并留下 None。如果直接从借用里移出一个裸 M，盒子会缺少有效字段，Rust 不允许；Option 提供了合法的空状态。
+
+expect 在 None 时 panic；测试只取出一次，第二个断言检查空状态。`#[cfg(test)]` 模块和 `#[test]` 函数是 Cargo 测试入口；assert_eq! 不相等会使测试失败。运行：
+
+```bash
+cargo test --offline
+```
+
+预期 `move_payload_out ... ok`，共 1 项测试。不需要先下载 Tokio。排错练习：在测试里再调用一次 unpack，观察失败后恢复。到此为止，你已经写出可用的第一版消息盒子。
+
+### 第二步：给消息加序号，并保留序号换载荷
+
+现在出现一个业务问题：把数字 7 转成文本 seven 时，如何知道它仍属于原来的那条消息？我们先加一个 partial_id 序号，下一步再扩展原版其余六个元信息字段。
+
+**只替换 src/envelope.rs**，Cargo.toml 和 lib.rs 都保留第一步的内容。完整文件：
+
+```rust
+{{#include ../../labs/envelope/step02.rs}}
+```
+
+先看新结构 EnvelopeInfo。`Option<u64>` 的 None 表示尚未指定序号，Some(0) 则是明确指定 0，二者不同。derive(Default) 给 Option 字段选择 None；derive(Clone) 让元信息能够复制。这两种 derive 来自 Rust 标准能力，不需要第三方 crate。
+
+new 现在同时初始化元信息和载荷。info 返回共享借用，info_mut 返回独占借用；调用方用后者写序号。repack 的 `&self` 表明它不取走旧载荷，只复制元信息并装入一个新的 T。因此测试最后还可以从原信封里取到 7。
+
+运行 `cargo test --offline`，预期 2 项测试通过：第一步的测试继续保留，第二项验证换类型和保留序号。排错实验：把 repack 中的 `self.info.clone()` 改成 `EnvelopeInfo::default()`，第二项测试应失败；恢复后通过。独立练习：写出一个“序号未指定时，换载荷后仍未指定”的测试。
+
+### 第三步的写作顺序
+
+下面先逐个解释需要加入的功能：七项元信息 → 其余载荷操作 → 有条件的克隆 → 类型擦除。完成这些讲解后，使用章末的完整文件替换 src/envelope.rs 和 lib.rs，再加入契约测试与示例。分段代码用于解释各部分，**不要把同名 struct 或 impl 的完整版本反复追加到旧文件末尾**。第三步仍只依赖标准库，不会引用 channel、config 或业务消息模块。
+
+## 3. 扩展：`EnvelopeInfo` 与 `Envelope<M>`
 
 ### 3.1 `EnvelopeInfo`——保留原版七项元信息
 

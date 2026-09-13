@@ -7,6 +7,4 @@ edition = "2021"
 exclude = ["message"]
 
 [dependencies]
-flow-message = { path = "message" }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
-thiserror = "2"

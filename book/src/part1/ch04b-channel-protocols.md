@@ -1,10 +1,72 @@
 # Ch1.4b 通道协议：容量、批量、限时与竞争接收
 
-先完成 Ch1.4a 的异步三步实验。本课继续修改 channel.rs，依次解决无界容量、权重批量、限时等待和多消费者。每一节运行对应测试后再进入下一节。
+先完成 Ch1.4 的五步工程和 Ch1.4a 的异步实验。继续在同一个 flow-rs 目录写代码，先增加无界队列，再共享接收端，最后加入限时与批量。下面第六至第八步接续上一章编号，每一步都保留已经通过的测试。
 
 完成标准：能解释容量 0 的含义、权重与条数的差别，以及多个接收者为何不会自动广播。
 
 <!-- toc -->
+
+## 第六步：一个接口容纳两种队列
+
+此时你已有 Cargo.toml、src/lib.rs、src/error.rs、src/channel.rs 和 message 依赖。**只替换 src/channel.rs**；其余文件保持 Ch1.4 第五步的内容。先读完下面的设计说明，再抄完整文件。
+
+为什么需要 enum？Tokio 的有界 Sender 与 UnboundedSender 是不同 Rust 类型，一个字段不能有时装这个、有时装那个。SendImpl 用 Bounded 和 Unbounded 两个变体统一表示它们；RecvImpl 同理。构造函数在容量为 0 时选择无界分支，其余选择有界分支。send_any 和 recv_any 再用 match 找到实际保存的端点。
+
+无界 send 没有 await，因为它不等容量；整个 send_any 仍是 async，给调用者一致的接口。枚举只表示队列种类，不解释消息载荷，因而不需要 TypeInfo 或 config。
+
+完整 **src/channel.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/06/channel.rs}}
+```
+
+在你的 flow-rs 目录运行 `cargo test --offline`，预期 **6 项测试**通过。上一章的五项仍在，新测试先放入 10 条消息才开始接收，验证容量 0 确实无界，并验证关闭后按原顺序排空。这个测试若被误改成容量 1 会卡在发送环节；维护脚本设有进程超时。
+
+练习：找出有界与无界发送返回值的共同点、等待行为的不同点。不要仅删除上一章的 assert 后继续调用 mpsc::channel(0)，那会在 Tokio 中 panic。
+
+## 第七步：让两个消费者使用同一条队列
+
+现在要让两个节点竞争接收。不能直接克隆 Tokio 的 Receiver；它本来就是单消费者。我们用 Arc 共享它，再用异步 Mutex 保证同一时刻只有一人操作接收端。
+
+**只替换 src/channel.rs**，其他文件不变。Arc 来自标准库，不增加下载依赖；Mutex 来自已经启用 sync feature 的 Tokio。
+
+完整 **src/channel.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/07/channel.rs}}
+```
+
+按三处变化核对：Receiver.inner 变成 `Arc<Mutex<RecvImpl>>`；构造时套上 Arc::new 和 Mutex::new；recv_any 先 lock().await 获得 guard，再 match 借用里面的枚举。`&mut *receiver` 先通过 guard 访问被保护的对象，再独占借用它。guard 离开函数时释放锁。
+
+因为可变访问由 Mutex 管理，公共接收方法改用 &self；原来调用处多写的 mut 可以删除。derive(Clone) 克隆 Arc，指向同一队列；没有为每个消费者复制载荷。锁内等待消息会串行化接收，拿到消息返回后业务处理不再占着锁。
+
+运行 `cargo test --offline`，预期 **7 项测试**通过。新测试让 first 取出 1、second 取出 2，然后两者都观察到关闭。它验证共享队列，不宣称两个并发任务总会按这个顺序分配消息。练习：说明为什么广播应当给两人各一份，而这里两人总共只得到两条。
+
+## 第八步：先设置等待上限，再收集一批消息
+
+空队列可能一直等。加入 time feature 才能创建 Tokio 定时器。**替换 Cargo.toml 和 src/channel.rs**；lib.rs、error.rs 和 message 不变。
+
+完整 **Cargo.toml**：
+
+```toml
+{{#include ../../labs/channel-steps/08/Cargo.toml}}
+```
+
+本步新增两个概念：select! 同时等待计时器与消息，先就绪的分支决定结果；pin! 为跨多次等待复用的定时器提供固定位置。先读下面“限时接收”和“批量接收”的返回值解释，再写本步完整文件。它仍不依赖转换表、类型包装或建图模块。
+
+完整 **src/channel.rs**：
+
+```rust
+{{#include ../../labs/channel-steps/08/channel.rs}}
+```
+
+新增 BatchRecvError 保存关闭时已经收集的消息。读 batch_recv_any 时先找到循环外的 timer、batch 和 weight，再读循环：等待 → 累加权重 → 达到阈值返回，否则继续。timer 不能每次循环重建，否则持续到来的消息可能无限延长等待时间。
+
+第一次更新 Cargo.toml 后运行 `cargo test`，此后用 offline，预期 **8 项测试**通过。新增测试先超时，再发送权重 2 的消息并关闭，用阈值 3 请求批次，必须在错误中拿回那一条消息。它不依赖网络或线程睡眠，测试超时后的接收端仍然可用。
+
+维护者运行 `python3 scripts/check_basic_channel_course.py`，脚本从 Ch1.4 第一步开始，在同一临时目录连续完成八步。本章的文件仅依赖已经写出的 error 和 message，没有最终工程文件的隐式补齐。
+
+以下各节进一步解释本步的业务契约；其中 `code/Cargo.toml` 命令是维护者针对最终仓库的扩展回归，读者当前工程使用上面的 cargo test 即可。
 
 ## 原版协议补充：容量 0 与无界通道
 
@@ -44,7 +106,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test unbounded_channel -
 
 ## 批量接收：按权重凑一批
 
-显式关闭与句柄释放的区别、完整通道文件和关闭测试见本章末尾。批处理收到关闭时仍必须保留已收到的部分批次。
+本步的关闭由最后一个端点释放触发。显式关闭涉及额外共享状态，在后续章节单独实现；批处理收到关闭时仍必须保留已收到的部分批次。
 
 原版 receiver.rs 的 batch_recv_any 使用 `weight.unwrap_or(1)` 累加权重。
 所以 n=3 不一定返回三条消息：权重依次为 0、1、4 时，返回三条，累计权重为 5；
@@ -53,9 +115,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test unbounded_channel -
 从单条接收扩展为批量接收，新增三个状态：已经收到的 batch、累计 weight、整批共享的
 计时器。计时器在循环外创建，不能每收一条就重新计时，否则持续有消息时可能永不超时。
 
-```rust,ignore
-{{#include ../../../code/flow-rs/src/channel.rs:batch_receive}}
-```
+本步完整 batch_receive 实现在第八步的文件中，先读 batch_recv_any，再读只负责类型恢复的 batch_recv。
 
 `tokio::pin!` 让计时器在循环的多次 select 中保持同一个 Future。select 等待超时或
 下一条消息，哪一项就绪就处理哪一项；两项同时就绪时不承诺固定优先级。
@@ -93,9 +153,7 @@ dev-dependencies 中打开；否则测试通过而下游正常构建失败。
 原版 `try_recv_any(dur)` 会等待最多给定时长，名称中的 try 不表示立即返回。
 它不同于许多队列的同步 try_recv。当前补充的实现如下：
 
-```rust,ignore
-{{#include ../../../code/flow-rs/src/channel.rs:timed_receive}}
-```
+本步完整 timed_receive 实现在第八步文件中，按 try_recv_any、try_recv 的顺序阅读。
 
 外层 Result 回答“接收是否遇到错误”，内层 Option 回答“本次等待有没有收到消息”：
 
@@ -165,35 +223,3 @@ Some(0)、Some(3)，形成 729 种序列；每种使用 0 至 7 的 8 个阈值�
 对照队列预先装好数据并关闭，避免把并发调度的偶然顺序当成固定答案。限时行为仍由
 前面的独立测试验证。这层证据不覆盖原版通道的 flush、多消费者轮次或统计；适配器
 只隔离验证批量算法，不能宣称已经运行完整原版运行时。
-
-## 显式关闭：克隆还活着，队列也要能停止
-
-`drop(sender)` 只释放一个句柄；`sender.close()` 或 `receiver.close()` 关闭所有克隆共享的队列。原版 `channel/inner.rs` 的 close 关闭队列并通知阻塞操作，普通消息可以在关闭后继续排空。本节保留这个行为，不把关闭当成丢弃所有消息。
-
-| 时刻 | 发送 | 接收 |
-|---|---|---|
-| 开放且有容量 | 入队成功 | 取走一条或等待 |
-| 显式关闭后 | 返回 ChannelClosed | 排空关闭前已入队的消息 |
-| 关闭且排空 | 返回 ChannelClosed | 返回 ChannelClosed |
-
-完整 `src/channel.rs`：
-
-```rust
-{{#include ../../../code/flow-rs/src/channel.rs}}
-```
-
-新增的 `CloseState` 是全部端点共享的 `Arc` 数据。Tokio 的 `watch` 保存一个持久 bool；与只发一次唤醒通知不同，后来订阅的任务也能读到 true。`send_replace(true)` 在没有订阅者时也保存值，重复关闭不会重新开放。这里继续使用现有 Tokio `sync` feature，不增加依赖。
-
-有界发送先 `reserve().await` 取得容量许可，再在标准库 Mutex 的短临界区中检查关闭并入队。close 使用同一把锁，所以并发发送与关闭有明确先后：先入队的消息保留，先关闭则发送失败。不能只在 await 前检查一次，否则等待容量期间发生关闭后，发送仍可能成功。锁内不等待异步操作，也不调用用户转换函数。
-
-接收仍由异步 Mutex 保证多个消费者竞争同一队列。正在等待消息的消费者同时等待关闭状态；关闭后调用 Tokio receiver.close，再排空缓存。等待接收锁的其他消费者随后也看到持久关闭状态。`biased` 让已经发生的关闭优先执行，但不会丢弃已入队消息。类型转换已启动时仍按原有转换任务规则结束；这里没有实现转换任务中断或 flush epoch。
-
-完整 `tests/channel_close.rs`：
-
-```rust
-{{#include ../../../code/flow-rs/tests/channel_close.rs}}
-```
-
-运行 `cargo test --manifest-path code/Cargo.toml -p flow-rs --test channel_close --locked`，预期三个测试通过。测试用 `poll!` 确认发送或接收确实进入 Pending，然后才关闭；一秒 timeout 用于发现无法唤醒的错误，不用于猜测调度时机。
-
-排错实验：在副本中去掉发送侧的关闭等待分支，满队列测试应超时；恢复后通过。独立练习：给排空测试的消息加入 partial_id，验证关闭不会修改元信息。此处展示的是当前通道模块的完整内容；它还依赖前述类型转换模块，不能单凭这一文件宣称已完成全书累计工程验证。

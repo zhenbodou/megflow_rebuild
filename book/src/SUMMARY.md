@@ -16,10 +16,10 @@
 - [Ch1.1 Rust 复习：并发下的所有权、借用、生命周期 + 错误处理](part1/ch01-rust-review.md)
 - [Ch1.2 泛型、trait、trait 对象 dyn、Any 与 downcast](part1/ch02-traits-dyn.md)
 - [Ch1.3 实现 Envelope 消息信封与类型擦除消息层](part1/ch03-envelope.md)
-- [Ch1.4 async/await、Future、tokio 入门 → channel 封装](part1/ch04-async-channel.md)
+- [Ch1.4 五步写出第一条消息通道](part1/ch04-async-channel.md)
 - [Ch1.4a 异步三步实验：Future、背压与关闭](part1/ch04a-async-workshop.md)
 - [Ch1.4b 通道协议：容量、批量、限时与竞争接收](part1/ch04b-channel-protocols.md)
-- [Ch1.4c 类型化与默认端点](part1/ch04c-typed-endpoints.md)
+- [Ch1.4c 第九、十步：类型包装与默认端点](part1/ch04c-typed-endpoints.md)
 - [Ch1.4d 类型信息与转换表](part1/ch04d-type-conversion.md)
 - [Ch1.4e 取消、超时与任务错误](part1/ch04e-cancellation-errors.md)
 
