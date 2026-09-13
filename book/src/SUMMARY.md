@@ -42,6 +42,7 @@
 
 - [Ch2.1 Node / Actor trait、端口、exec 循环（手写不用宏）](part2/ch01-node-trait.md)
 - [Ch2.1a 手写节点实作：逐步装配与错误收尾](part2/ch01a-manual-actor-workshop.md)
+- [Ch2.2 第十六步：生成首个 Node 派生宏](part2/ch02-first-node-derive.md)
 - [Ch2.3 实现 inputs / outputs / derive(Node) / methods 宏](part2/ch03-node-macros.md)
 - [Ch2.3b 从手写实现追踪宏展开](part2/ch03b-expansion-walkthrough.md)
 - [Ch2.4 node_register! 与 inventory 注册表](part2/ch04-registry.md)

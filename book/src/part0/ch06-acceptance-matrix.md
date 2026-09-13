@@ -238,6 +238,7 @@
 | `book/src/part1/ch04e-cancellation-errors.md` | 待登记；未验证 |
 | `book/src/part2/ch01-node-trait.md` | 待登记；未验证 |
 | `book/src/part2/ch01a-manual-actor-workshop.md` | 待登记；未验证 |
+| `book/src/part2/ch02-first-node-derive.md` | 待登记；未验证 |
 | `book/src/part2/ch03-node-macros.md` | 待登记；未验证 |
 | `book/src/part2/ch03b-expansion-walkthrough.md` | 待登记；未验证 |
 | `book/src/part2/ch04-registry.md` | 待登记；未验证 |

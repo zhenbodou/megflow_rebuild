@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
         "python3", str(ROOT / "scripts/message_checkpoint.py"), "--stage", "envelope", "--out", str(target / "message")
     ], check=True, timeout=60)
     shutil.copyfile(ROOT / "code/Cargo.lock", target / "Cargo.lock")
-    for step in ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "12a", "13"):
+    for step in ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "12a", "13", "14", "15", "16"):
         if step in ("01", "02", "03"):
             files = {"Cargo.toml": f"channel-steps/{step}/Cargo.toml",
                      "src/lib.rs": f"channel-steps/{step}/lib.rs"}
@@ -25,6 +25,15 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
         elif step == "05":
             files = {name: f"channel-basic/{name}" for name in
                      ("Cargo.toml", "src/lib.rs", "src/error.rs", "src/channel.rs")}
+        elif step in ("14", "15"):
+            files = {"src/lib.rs": "node-steps/lib.rs",
+                     "src/node.rs": f"node-steps/{step}/node.rs"}
+        elif step == "16":
+            files = {"Cargo.toml": "node-steps/16/Cargo.toml",
+                     "src/lib.rs": "node-steps/16/lib.rs",
+                     "src/node.rs": "node-steps/16/node.rs",
+                     "derive/Cargo.toml": "node-steps/16/derive-Cargo.toml",
+                     "derive/src/lib.rs": "node-steps/16/derive-lib.rs"}
         else:
             files = {"src/channel.rs": f"channel-steps/{step}/channel.rs"}
             if step == "08":
@@ -52,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
         if step == "12a":
             shutil.copyfile(ROOT / "code/flow-rs/tests/channel_type_guess.rs", target / "tests/channel_type_guess.rs")
         subprocess.run([
-            "cargo", "test", "--manifest-path", str(target / "Cargo.toml"), "--offline"
+            "cargo", "test", "--manifest-path", str(target / "Cargo.toml"), "--workspace", "--offline"
         ], check=True, timeout=180)
         print(f"通道第 {step} 步通过", flush=True)
-print("通道入门至显式关闭：同一工程十三步及 12a 补充构建通过。")
+print("通道到首个节点宏：同一工程十六步及 12a 补充构建通过。")
