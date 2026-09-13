@@ -13,13 +13,42 @@ use crate::config::interlayer::MsgTypeId;
 use crate::error::{Error, Result};
 use flow_message::{Envelope, SealedEnvelope};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
+
+/// 持久关闭状态与入队临界区；锁内不执行 await 或用户转换函数。
+struct CloseState {
+    gate: std::sync::Mutex<()>,
+    closed: watch::Sender<bool>,
+}
+impl CloseState {
+    fn new() -> Self {
+        Self {
+            gate: std::sync::Mutex::new(()),
+            closed: watch::channel(false).0,
+        }
+    }
+    fn close(&self) {
+        let _guard = self.gate.lock().unwrap();
+        self.closed.send_replace(true);
+    }
+    fn is_closed(&self) -> bool {
+        *self.closed.borrow()
+    }
+    async fn wait(&self) {
+        let mut state = self.closed.subscribe();
+        state
+            .wait_for(|closed| *closed)
+            .await
+            .expect("close state retained");
+    }
+}
 
 /// 通道发送端。可 `Clone`（多生产者扇入）。
 /// Sending half; `Clone` for multi-producer fan-in.
 #[derive(Clone, Default)]
 pub struct Sender {
     inner: SendImpl,
+    close_state: Option<Arc<CloseState>>,
     channel_type: MsgTypeId,
     conversion: Option<CvtF>,
 }
@@ -28,6 +57,7 @@ pub struct Sender {
 #[derive(Clone, Default)]
 pub struct Receiver {
     inner: Option<Arc<Mutex<RecvImpl>>>,
+    close_state: Option<Arc<CloseState>>,
     channel_type: MsgTypeId,
     conversion: Option<CvtF>,
 }
@@ -52,16 +82,19 @@ pub fn channel(capacity: usize) -> (Sender, Receiver) {
 /// 创建带通道类型描述的队列。描述不执行转换或验证实际消息载荷。
 /// 这是后续 ChannelStorage/类型推断的装配入口，不能替代 CVT_VTABLE。
 pub fn channel_with_type(capacity: usize, channel_type: MsgTypeId) -> (Sender, Receiver) {
+    let close_state = Arc::new(CloseState::new());
     if capacity == 0 {
         let (tx, rx) = mpsc::unbounded_channel();
         (
             Sender {
                 inner: SendImpl::Unbounded(tx),
+                close_state: Some(close_state.clone()),
                 channel_type,
                 conversion: None,
             },
             Receiver {
                 inner: Some(Arc::new(Mutex::new(RecvImpl::Unbounded(rx)))),
+                close_state: Some(close_state),
                 channel_type,
                 conversion: None,
             },
@@ -71,11 +104,13 @@ pub fn channel_with_type(capacity: usize, channel_type: MsgTypeId) -> (Sender, R
         (
             Sender {
                 inner: SendImpl::Bounded(tx),
+                close_state: Some(close_state.clone()),
                 channel_type,
                 conversion: None,
             },
             Receiver {
                 inner: Some(Arc::new(Mutex::new(RecvImpl::Bounded(rx)))),
+                close_state: Some(close_state),
                 channel_type,
                 conversion: None,
             },
@@ -109,6 +144,12 @@ impl TypeInfo for Receiver {
 }
 
 impl Sender {
+    /// 关闭所有克隆共享的队列，已入队消息仍可排空。
+    pub fn close(&self) {
+        if let Some(state) = &self.close_state {
+            state.close();
+        }
+    }
     /// 缓存端口类型 → 通道类型的直接转换，与原版装配方向一致。
     #[doc(hidden)]
     pub fn with_type(&mut self, port_type: &MsgTypeId) {
@@ -127,10 +168,29 @@ impl Sender {
             return Ok(());
         }
         let msg = convert(self.conversion, msg).await?;
+        let state = self.close_state.as_ref().expect("connected channel");
         match &self.inner {
             SendImpl::Unconnected => Ok(()),
-            SendImpl::Bounded(tx) => tx.send(msg).await.map_err(|_| Error::ChannelClosed),
-            SendImpl::Unbounded(tx) => tx.send(msg).map_err(|_| Error::ChannelClosed),
+            SendImpl::Bounded(tx) => {
+                let permit = tokio::select! {
+                    biased;
+                    _ = state.wait() => return Err(Error::ChannelClosed),
+                    permit = tx.reserve() => permit.map_err(|_| Error::ChannelClosed)?,
+                };
+                let _guard = state.gate.lock().unwrap();
+                if state.is_closed() {
+                    return Err(Error::ChannelClosed);
+                }
+                permit.send(msg);
+                Ok(())
+            }
+            SendImpl::Unbounded(tx) => {
+                let _guard = state.gate.lock().unwrap();
+                if state.is_closed() {
+                    return Err(Error::ChannelClosed);
+                }
+                tx.send(msg).map_err(|_| Error::ChannelClosed)
+            }
         }
     }
 
@@ -148,6 +208,13 @@ impl Sender {
 
     /// 通道是否已关闭（所有 `Receiver` 均已 drop）。
     pub fn is_closed(&self) -> bool {
+        if self
+            .close_state
+            .as_ref()
+            .is_some_and(|state| state.is_closed())
+        {
+            return true;
+        }
         match &self.inner {
             SendImpl::Unconnected => true,
             SendImpl::Bounded(tx) => tx.is_closed(),
@@ -167,6 +234,12 @@ impl<T> std::fmt::Debug for BatchRecvError<T> {
 }
 
 impl Receiver {
+    /// 关闭共享队列；不丢弃关闭前已入队的消息。
+    pub fn close(&self) {
+        if let Some(state) = &self.close_state {
+            state.close();
+        }
+    }
     /// 缓存通道类型 → 端口类型的直接转换。
     #[doc(hidden)]
     pub fn with_type(&mut self, port_type: &MsgTypeId) {
@@ -259,9 +332,18 @@ impl Receiver {
         let inner = self.inner.as_ref().ok_or(Error::ChannelClosed)?;
         let msg = {
             let mut receiver = inner.lock().await;
+            let state = self.close_state.as_ref().expect("connected channel");
             match &mut *receiver {
-                RecvImpl::Bounded(rx) => rx.recv().await,
-                RecvImpl::Unbounded(rx) => rx.recv().await,
+                RecvImpl::Bounded(rx) => tokio::select! {
+                    biased;
+                    _ = state.wait() => { rx.close(); rx.recv().await },
+                    message = rx.recv() => message,
+                },
+                RecvImpl::Unbounded(rx) => tokio::select! {
+                    biased;
+                    _ = state.wait() => { rx.close(); rx.recv().await },
+                    message = rx.recv() => message,
+                },
             }
             .ok_or(Error::ChannelClosed)?
         };

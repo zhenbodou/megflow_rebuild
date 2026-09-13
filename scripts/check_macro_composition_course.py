@@ -17,6 +17,6 @@ with tempfile.TemporaryDirectory(prefix="megflow-macro-composition-") as directo
     shutil.copytree(ROOT / "code/macro-labs", lab, ignore=shutil.ignore_patterns("target"))
     for features in ([], ["--features", "metrics"]):
         subprocess.run(["cargo", "test", "--manifest-path", str(lab / "Cargo.toml"),
-                        "-p", "macro-lab-app", "--test", "composition", "--offline", *features],
+                        "-p", "macro-lab-app", "--test", "composition", "--offline", "--no-default-features", *features],
                        check=True, timeout=180)
 print("宏组合：AST 遍历及 metrics 开/关测试通过。")

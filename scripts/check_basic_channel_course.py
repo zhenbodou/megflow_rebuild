@@ -10,7 +10,7 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
     target = Path(directory) / "channel-basic"
     shutil.copytree(ROOT / "book/labs/channel-basic", target)
     subprocess.run([
-        "python3", str(ROOT / "scripts/message_checkpoint.py"), "--out", str(target / "message")
+        "python3", str(ROOT / "scripts/message_checkpoint.py"), "--stage", "envelope", "--out", str(target / "message")
     ], check=True, timeout=60)
     shutil.copyfile(ROOT / "code/Cargo.lock", target / "Cargo.lock")
     subprocess.run([

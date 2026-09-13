@@ -67,7 +67,7 @@
 {{#include ../../../code/flow-derive/src/node.rs:set_port_dynamic_gen}}
 ```
 
-生成的实现按 `port_info.name.as_str()` 匹配字段名字面量（如 `"out"`），命中就 `self.out.push(port_info.name.clone(), config)`——把 `DynPortsConfig` 塞进该字段的 `DynPorts.cfg`。这正是原版 `set_dyn_f` 的行为。无 dyn 字段的节点 `dyn_arms` 为空、不生成覆盖，沿用 trait 默认 no-op——既有那十来个 `#[derive(Node)]` 节点一个不受影响。（生成的 close 调用 `self.#id.close()`，只关闭 Broker 通知；缓存端点仍需 evict 或随字段销毁，不能据此保证实例退出。）
+生成的实现按 `port_info.name.as_str()` 匹配字段名字面量（如 `"out"`），命中就 `self.out.push(port_info.name.clone(), config)`——把 `DynPortsConfig` 塞进该字段的 `DynPorts.cfg`。这正是原版 `set_dyn_f` 的行为。无 dyn 字段的节点 `dyn_arms` 为空、不生成覆盖，沿用 trait 默认 no-op——既有那十来个 `#[derive(Node)]` 节点一个不受影响。（生成的 close 调用 `self.#id.close()`，关闭 Broker 通知及缓存端点的共享队列；外部克隆仍存在也不能继续发送，任务回收仍需 await。）
 
 **本章的测试手工调用 `set_port_dynamic`，用来隔离验证派生代码。** 当前完整源码已有下一章的建图期调用者；不要把“本课尚未学习调用者”理解为“当前仓库没有调用者”。运行期实例的外部端点表与节点字段中的 DynPorts 是两个层次，下一章负责把配置接到后者。
 
@@ -167,7 +167,7 @@ cargo test --manifest-path code/Cargo.toml --workspace --locked
 1. 把 typed 发送中的 `42i32` 改成 `42u32`，应出现类型不匹配的编译错误；恢复后通过。说明类型检查发生在生成后的 Rust 方法调用处。
 2. 将注入名字 out 改为不存在的字段名，create 应失败。解释为什么这次不是宏解析错误，而是运行时没有取得配置。
 3. 不看宏，手写 `DynPorts<ReceiverT<i32>>` 的 fetch 方法，指出读取 outputs 的原因，再与宏替换结果核对。
-4. 画出发送端的三处所有者：通知、缓存、本地克隆。说明仅 drop 本地克隆为何不足以关闭实例，以及测试为何必须 evict 缓存；DynPorts::close 只关闭 Broker，不清空缓存。
+4. 画出发送端的三处所有者：通知、缓存、本地克隆。说明仅 drop 本地克隆为何不足以关闭实例；比较 evict 删除句柄与 close 关闭共享队列的区别。第一个测试保留本地克隆和缓存，仍应完成实例回收。
 
 ## 7. 落差与后续
 

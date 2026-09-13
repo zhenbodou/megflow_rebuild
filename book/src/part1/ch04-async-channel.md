@@ -94,10 +94,10 @@ channel-basic/
 
 ```bash
 mkdir -p /tmp/megflow-channel-study/src
-python3 scripts/message_checkpoint.py --out /tmp/megflow-channel-study/message
+python3 scripts/message_checkpoint.py --stage envelope --out /tmp/megflow-channel-study/message
 ```
 
-这个导出命令要求目标 message 目录不存在，不会覆盖你的工程。它导出当前消息库，包含业务消息扩展；本章代码仅使用 Ch1.3 的 Envelope 和 SealedEnvelope。因而它证明基础通道可独立构建，尚不能替代全书冻结的逐章累计快照验收。手写路线可直接使用你上一章的消息库。
+这个导出命令要求目标 message 目录不存在，不会覆盖你的工程。它只导出 Ch1.3 的信封阶段，不带后续业务消息模块。本章仅使用上一章的 Envelope 和 SealedEnvelope。手写路线可直接使用你上一章的消息库；这个检查点仍不能替代全书所有阶段的累计验收。
 
 ### Cargo.toml 完整内容
 

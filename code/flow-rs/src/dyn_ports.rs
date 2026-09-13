@@ -204,14 +204,45 @@ impl<V> DynPorts<V> {
         self.cache.remove(&key)
     }
 
-    /// 关闭所有动态端口的 broker client（topic 任务随之结束，`Broker::run` 句柄可解析）。
-    pub fn close(&self) {
+    /// 关闭通知及缓存通道；外部保留的端点克隆也会观察到关闭。
+    pub fn close(&self)
+    where
+        V: ClosePort,
+    {
         for cfg in self.cfg.values() {
             cfg.broker.close();
+        }
+        for port in self.cache.values() {
+            port.close_port();
         }
     }
 }
 // ANCHOR_END: dyn_ports_common
+
+/// 动态端口关闭所需的最小能力，类型化端点转调内部通道。
+pub trait ClosePort {
+    fn close_port(&self);
+}
+impl ClosePort for Sender {
+    fn close_port(&self) {
+        self.close();
+    }
+}
+impl ClosePort for Receiver {
+    fn close_port(&self) {
+        self.close();
+    }
+}
+impl<T> ClosePort for SenderT<T> {
+    fn close_port(&self) {
+        self.close();
+    }
+}
+impl<T> ClosePort for ReceiverT<T> {
+    fn close_port(&self) {
+        self.close();
+    }
+}
 
 // ANCHOR: dyn_fetch_macro
 /// `fetch` 三方法（`fetch` / `try_fetch` / `fetch_with_cache`）在四个特化里**逻辑完全相同**，
@@ -229,12 +260,16 @@ macro_rules! dyn_fetch_methods {
             loop {
                 let mut conns = cfg.broker.fetch::<DynConns>().await?;
                 if conns.name == key {
-                    return conns.$field.remove(&cfg.target).map(Into::into).ok_or_else(|| {
-                        Error::Unsupported(format!(
-                            "dynamic {} port {:?} missing in instance {key}",
-                            $noun, cfg.target
-                        ))
-                    });
+                    return conns
+                        .$field
+                        .remove(&cfg.target)
+                        .map(Into::into)
+                        .ok_or_else(|| {
+                            Error::Unsupported(format!(
+                                "dynamic {} port {:?} missing in instance {key}",
+                                $noun, cfg.target
+                            ))
+                        });
                 }
                 // 非目标 key 的 DynConns 在此 drop（无缓存版本按单实例用法设计）。
             }
@@ -268,10 +303,9 @@ macro_rules! dyn_fetch_methods {
                 }
                 // conns 其余端点（另一张表、别的端口）在此 drop（R3）。
             }
-            self.cache
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| Error::Unsupported(format!("dynamic {} for key {key} missing", $noun)))
+            self.cache.get(&key).cloned().ok_or_else(|| {
+                Error::Unsupported(format!("dynamic {} for key {key} missing", $noun))
+            })
         }
     };
 }

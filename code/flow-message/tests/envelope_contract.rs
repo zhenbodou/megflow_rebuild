@@ -1,6 +1,76 @@
 use flow_message::{str2addr, Envelope, EnvelopeInfo};
 use std::sync::Arc;
 
+#[test]
+fn empty_access_panics_and_repeated_take_remains_empty() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let mut envelope = Envelope::new(42);
+    assert_eq!(envelope.unpack(), 42);
+    assert!(catch_unwind(AssertUnwindSafe(|| envelope.unpack())).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        envelope.get_ref();
+    }))
+    .is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        envelope.get_mut();
+    }))
+    .is_err());
+    assert!(envelope.take().is_none());
+    assert!(envelope.take().is_none());
+    envelope.repack_inplace(7);
+    assert_eq!(envelope.unpack(), 7);
+}
+
+#[test]
+fn wrong_downcast_preserves_payload_and_dummy_rejects_metadata() {
+    use flow_message::DummyEnvelope;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let mut sealed = Envelope::new(String::from("retained")).seal();
+    assert!(sealed.downcast_mut::<Envelope<u32>>().is_none());
+    assert_eq!(
+        sealed.downcast_ref::<Envelope<String>>().unwrap().get_ref(),
+        "retained"
+    );
+    let mut dummy = DummyEnvelope.seal();
+    assert!(dummy.clone().is_none());
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        dummy.info();
+    }))
+    .is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        dummy.info_mut();
+    }))
+    .is_err());
+}
+
+#[test]
+fn payload_moves_and_replacements_release_exactly_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone)]
+    struct Tracked(Arc<AtomicUsize>);
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut source = Envelope::new(Tracked(drops.clone()));
+    let moved = source.take();
+    drop(source);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let mut sealed = moved.seal();
+    let copied = sealed.clone();
+    sealed
+        .downcast_mut::<Envelope<Tracked>>()
+        .unwrap()
+        .repack_inplace(Tracked(drops.clone()));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(copied);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+    drop(sealed);
+    assert_eq!(drops.load(Ordering::SeqCst), 3);
+}
+
 fn metadata() -> EnvelopeInfo {
     EnvelopeInfo {
         skipped: true,

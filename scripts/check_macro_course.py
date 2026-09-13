@@ -29,9 +29,12 @@ run("cargo", "test", "--manifest-path", "code/macro-labs/Cargo.toml", "--locked"
 
 with tempfile.TemporaryDirectory(prefix="megflow-macro-course-") as directory:
     temporary = Path(directory)
-    for stage in (1, 2, 3):
+    for stage in (1, 2, 3, 4):
         target = temporary / str(stage)
         run(sys.executable, "scripts/macro_checkpoint.py", "--stage", stage, "--out", target)
         run("cargo", "run", "--manifest-path", target / "Cargo.toml", "-p",
             "macro-lab-app", "--locked", "--target-dir", temporary / "target")
-print("宏课程：七个示例、进阶宏测试和三个独立检查点全部通过。")
+        if stage == 4:
+            run("cargo", "test", "--manifest-path", target / "Cargo.toml", "--offline",
+                "--locked", "--target-dir", temporary / "target")
+print("宏课程：示例、进阶宏测试和四个独立检查点全部通过。")

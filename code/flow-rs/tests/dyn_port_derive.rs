@@ -139,12 +139,12 @@ async fn derive_dyn_output_injects_then_round_trips() {
             "frame"
         );
 
-        // 拆除（R3）：drop 本地端点 + evict 缓存里的入口 Sender → 实例失去唯一外部发送端、停机，handle 解析。
-        drop(sender);
-        drop(receiver);
-        trigger.out.evict(7);
-        handle.await.unwrap().unwrap();
+        // 保留本地克隆和缓存，验证显式关闭确实传播到共享队列。
         trigger.out.close();
+        assert!(sender.is_closed());
+        assert!(sender.send_any(Envelope::new(9).seal()).await.is_err());
+        handle.await.unwrap().unwrap();
+        assert!(receiver.recv_any().await.is_err());
         consumer.close();
         broker_task.await.unwrap().unwrap();
     })

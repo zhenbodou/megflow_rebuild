@@ -168,9 +168,9 @@ impl<M: Clone> Clone for Envelope<M> {
 /// non-generic methods so it stays object-safe (see Ch1.2 §4).
 ///
 /// `as_any` 把自己降级成 `&dyn Any`，真正的 downcast 交给标准库那套**安全**实现——
-/// 这正是相对原版「手写 unsafe transmute」的改进（Ch1.2 §5）。
+/// 这正是相对原版「手写 unsafe 裸指针转换」的改进（Ch1.2 §5）。
 /// `as_any` demotes `self` to `&dyn Any`; the actual downcast is std's *safe*
-/// one — our improvement over the original's hand-rolled `unsafe` transmute.
+/// one — our improvement over the original's hand-rolled `unsafe` pointer casts.
 // ANCHOR: any_envelope_trait
 pub trait AnyEnvelope: Any {
     fn as_any(&self) -> &dyn Any;

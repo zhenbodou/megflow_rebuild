@@ -14,70 +14,27 @@
 - `AnyEnvelope`——类型擦除的 trait，把泛型 `M` 藏起来，只暴露不带泛型的方法（Ch1.2 §4 的对象安全约束）。
 - `SealedEnvelope = Box<dyn AnyEnvelope + Send>`——装箱擦除后的盒子，是 channel 真正搬运的东西；下游用 `downcast` 把类型「认领」回来。
 
-对应到真实 flow-rs（Ch0.3 读过），原版把这套拆在 `envelope/` 下三个文件里（`envelope.rs` / `any_envelope.rs` / `mod.rs`）。我们重写**合成一个 `envelope.rs`**——这一层总共一百多行，拆三个文件反而割裂阅读；文件该按「一起变的东西放一起」来分，而不是按类型数量分。
+对应到真实 flow-rs（Ch0.3 读过），原版把这套拆在 `envelope/` 下三个文件里（`envelope.rs` / `any_envelope.rs` / `mod.rs`）。我们重写**合成一个 `envelope.rs`**——这一层总共数百行，拆三个文件反而割裂阅读；文件该按「一起变的东西放一起」来分，而不是按类型数量分。
 
 ## 2. 红：先写一个跑不起来的测试
 
 TDD 的第一步永远是**红**——写出测试，运行，看它**因为「东西还不存在」而失败**。这一步的价值在于：它先帮你站在**调用方**视角，把 API 长什么样定下来。
 
-我们在 `code/flow-message/src/envelope.rs` 里先只写测试模块（此刻 `Envelope` 等类型都还不存在）：
+先在空练习目录创建 `red.rs`，只写以下完整文件。此时故意不定义 `Envelope`：
 
-```rust,ignore
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_then_unpack() {
-        let mut e = Envelope::new(1i32);
-        assert!(e.is_some());
-        assert_eq!(e.unpack(), 1i32);
-        assert!(e.is_none()); // unpack 取走后信封为空
-    }
-
-    #[test]
-    fn repack_carries_info_and_changes_type() {
-        let mut src = Envelope::new(7i32);
-        src.info_mut().partial_id = Some(42);
-        // 换载荷类型：i32 → String，元信息随行
-        let mut dst = src.repack(String::from("hi"));
-        assert_eq!(dst.info().partial_id, Some(42));
-        assert_eq!(dst.unpack(), "hi");
-    }
-
-    #[test]
-    fn type_erasure_seal_then_downcast() {
-        let sealed: SealedEnvelope = Envelope::new(3i32).seal();
-        assert!(sealed.is::<Envelope<i32>>());
-        assert!(!sealed.is::<Envelope<String>>());
-        // 认领回具体类型：猜错得 None（安全），猜对拿到 &mut
-        assert!(sealed.downcast_ref::<Envelope<String>>().is_none());
-        let mut sealed = sealed;
-        let inner = sealed.downcast_mut::<Envelope<i32>>().unwrap();
-        assert_eq!(inner.unpack(), 3i32);
-    }
-}
+```rust,compile_fail
+{{#include ../../labs/envelope/red.rs}}
 ```
 
-在 `lib.rs` 里挂上 `pub mod envelope;`，然后运行：
+运行：
 
 ```bash
-cargo test -p flow-message
+rustc --edition=2021 --test red.rs -o red-test
 ```
 
-结果如预期——**红**：
+预期编译失败，诊断包含 E0433 和未声明的 `Envelope`。行号、措辞和错误总数可能随工具链变化，不作为契约。维护脚本会实际验证这个失败，避免把环境故障误认为正确的“红”。
 
-```text
-error[E0433]: cannot find type `Envelope` in this scope
-  --> flow-message/src/envelope.rs:17:21
-   |
-17 |         let mut e = Envelope::new(1i32);
-   |                     ^^^^^^^^ use of undeclared type `Envelope`
-...
-error: could not compile `flow-message` (lib test) due to 15 previous errors
-```
-
-这三个测试就是**可执行的契约**：`new`/`unpack`/`is_some`/`is_none`、`repack` 换类型且**元信息随行**、`seal`→`downcast` 的类型擦除与安全认领。下面写实现让它们变绿。
+这个测试先约定 `new`、`unpack` 与空载荷状态。接着按下文理解实现，建立章末的完整 Cargo 工程，再运行成功测试；`red.rs` 是独立的故障实验，不放入完成工程的 `src` 或 `tests`。后续测试继续约定元信息保留、类型擦除、失败路径和资源释放。
 
 ```mermaid
 flowchart LR
@@ -152,7 +109,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-message --test envelope_contr
 
 ### 4.1 `AnyEnvelope`：对象安全的擦除接口
 
-trait 里**每个方法都不带泛型参数**（守住 Ch1.2 §4 的对象安全红线），关键是 `as_any` 把自己「降级」成 `&dyn Any`。除此之外还有一个**关键方法** `clone_box`——它是「类型擦除之后还能克隆信封」的唯一出路（真实源码取自 `code/flow-message/src/envelope.rs`）：
+trait 里**每个方法都不带泛型参数**（守住 Ch1.2 §4 的对象安全红线），关键是 `as_any` 把自己「降级」成 `&dyn Any`。除此之外还有一个**关键方法** `clone_box`——它是「类型擦除之后还能克隆信封」的本项目采用的方案（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
 ```rust
 {{#include ../../../code/flow-message/src/envelope.rs:any_envelope_trait}}
@@ -180,13 +137,13 @@ trait 里**每个方法都不带泛型参数**（守住 Ch1.2 §4 的对象安�
 
 ### 4.3 安全 downcast：抹掉原版那段 `unsafe`
 
-这是本章相对原版最实在的一处改进。回顾 Ch1.2 §5：原版在 `impl dyn AnyEnvelope` 上**手写** `downcast_ref`，内部用 `unsafe` 把裸指针 `transmute` 成 `&T`。我们不必自己 transmute——既然 `as_any()` 能给出 `&dyn Any`，就把「变回具体类型」全权交给**标准库那套久经考验的安全实现**（真实源码取自 `code/flow-message/src/envelope.rs`）：
+这是本章相对原版最实在的一处改进。回顾 Ch1.2 §5：原版在 `impl dyn AnyEnvelope` 上**手写** `downcast_ref`，内部用 `unsafe` 把裸指针转换后解引用得到 `&T`。我们不必自己转换裸指针——既然 `as_any()` 能给出 `&dyn Any`，就把「变回具体类型」全权交给**标准库那套久经考验的安全实现**（真实源码取自 `code/flow-message/src/envelope.rs`）：
 
 ```rust
 {{#include ../../../code/flow-message/src/envelope.rs:safe_downcast}}
 ```
 
-整段代码**零 `unsafe`**。`downcast` 带泛型参数 `T`，所以它只能是 `impl` 块上的**关联函数**、进不了 vtable（Ch1.2 §4 的对象安全约束依然生效）——这一点和原版一致；不同的是内部实现从「手写 unsafe transmute」换成了「std 安全路径」。测试 `type_erasure_seal_then_downcast` 里「猜错类型得 `None` 而不崩」正是这份安全性的体现。
+整段代码**零 `unsafe`**。`downcast` 带泛型参数 `T`，因此这里把它放在 trait 对象的 `impl` 块中，作为**固有方法**，不参与 vtable 分发（Ch1.2 §4 的对象安全约束依然生效）——这一点和原版一致；不同的是内部实现从「手写 unsafe 裸指针转换」换成了「std 安全路径」。测试 `type_erasure_seal_then_downcast` 里「猜错类型得 `None` 而不崩」正是这份安全性的体现。
 
 > **一处细节**：这三个便捷方法定义在 `dyn AnyEnvelope + Send` 上（正是 `SealedEnvelope` 的内层类型），所以对一个 `SealedEnvelope` 直接 `sealed.downcast_ref::<...>()` 就能用。原版为了同时支持 `+ Send`、`+ Send + Sync` 等多种标记组合写了三个几乎重复的 `impl` 块；我们当前只有 `+ Send` 一种擦除盒子在用，就只写这一个——需要别的组合时再加，不预先铺开。
 
@@ -228,7 +185,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 | 维度 | 原版 flow-rs | 本书重写 | 为什么 |
 |---|---|---|---|
-| `downcast` 实现 | `impl dyn AnyEnvelope` 手写，含 `unsafe` transmute | `as_any() -> &dyn Any` + std 安全 downcast，**零 unsafe** | 更少 unsafe = 更少潜在 UB，把正确性交给标准库 |
+| `downcast` 实现 | 先比较类型，再在 `unsafe` 中转换裸指针并解引用 | `as_any() -> &dyn Any` + std 安全 downcast | 把类型恢复交给标准库安全接口 |
 | `EnvelopeInfo` 字段 | 7 个 | 同样保留 7 个 | 转发与重打包不丢失协议元信息 |
 | `M: Clone` 约束 | 主方法块有 Clone 约束 | 基本信封操作（`impl<M>`）不要求 Clone；`AnyEnvelope`/`seal` 仍要求 Clone（`clone_box` 逼出，Ch4.2 广播用） | 可构造不可克隆载荷的信封做纯本地运算，但送进引擎搬运（seal）仍需 Clone |
 | `Send` 约束 | 混在方法块 | 只加在真正要跨线程的 `seal` 上 | 约束跟着需求走 |
@@ -245,7 +202,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - **`Envelope<M>`**：载荷 `Option<M>`（支持取走 + 空信封）；`repack<T>` 换类型且元信息随行；`Clone` 拆成按需条件实现。
 - **类型擦除三件套**：对象安全的 `AnyEnvelope`（`as_any` 降级）→ `SealedEnvelope = Box<dyn AnyEnvelope + Send>`（`seal` 装箱，`+ Send` 通行证）→ **零 unsafe** 的安全 `downcast`（认领回具体类型，猜错得 `None`）。
 - **约束跟着需求走**：`'static`/`Send`/`Clone` 各自只加在真正需要的方法/impl 上，而非一刀切绑死。
-- **零外部依赖**：纯 std 完成；`dyn-clone` 等推迟到用得上的章节。
+- **零外部依赖**：纯 std 完成；当前无需添加 `dyn-clone`。
 
 下一章 **Ch1.4**：给引擎装上**异步的心跳**——`async`/`await`、`Future`、`tokio` 入门，然后把 tokio 的 channel **封装**成引擎自己的收发端，让 `SealedEnvelope` 真正在任务之间「流动」起来。同样红-绿，代码写进 `code/flow-rs`。
 
@@ -257,14 +214,14 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 在仓库根目录导出到一个尚不存在的目录：
 
 ```bash
-python3 scripts/message_checkpoint.py --out /tmp/megflow-message-chapter
+python3 scripts/message_checkpoint.py --stage envelope --out /tmp/megflow-message-chapter
 cd /tmp/megflow-message-chapter
 cargo test --offline
 ```
 
 若目标已存在，脚本会拒绝覆盖。请换一个新目录，保留你已经写过的代码。
 这里的 offline 用于证明消息层不需要下载第三方 crate；首次安装 Rust 工具链仍需
-按环境章节完成。预期是 8 个源码单元测试和 4 个信封契约测试通过。
+按环境章节完成。预期是 8 个源码单元测试和 7 个信封契约测试通过。
 
 生成的文件结构：
 
@@ -276,6 +233,8 @@ megflow-message-chapter/
     envelope.rs
   tests/
     envelope_contract.rs
+  examples/
+    first_principles.rs
 ```
 
 ### 手工搭建时逐个文件做什么
@@ -289,7 +248,51 @@ megflow-message-chapter/
    能发现“模块内部能用，但库没有公开导出”的问题。
 5. 执行 cargo test --offline，检查测试数量，不能把零测试通过当作本章完成。
 
+### 本阶段的完整文件
+
+前文分段解释每项机制；下面给出可直接核对的完整文件。这里的 lib.rs 只声明 envelope，不引入后面的 algo_base 或 Dr。默认导出模式 full 用于后续消息业务章节；本章必须使用上面的 `--stage envelope`。
+
+`Cargo.toml`：
+
+```toml
+{{#include ../../labs/envelope/Cargo.toml}}
+```
+
+`src/lib.rs`：
+
+```rust
+{{#include ../../labs/envelope/src/lib.rs}}
+```
+
+`src/envelope.rs`（包含八个单元测试）：
+
+```rust
+{{#include ../../../code/flow-message/src/envelope.rs}}
+```
+
+`tests/envelope_contract.rs`（独立调用者的契约测试）：
+
+```rust
+{{#include ../../../code/flow-message/tests/envelope_contract.rs}}
+```
+
+`examples/first_principles.rs`（逐步从普通值走到类型擦除）：
+
+```rust
+{{#include ../../../code/flow-message/examples/first_principles.rs}}
+```
+
+保存这些文件后，在新工程目录执行 `cargo test --offline` 和 `cargo run --offline --example first_principles`。库入口负责公开类型；单元测试可以访问模块内部，集成测试只能访问公开 API；example 则是使用这个库的独立可执行目标。三者用途不同，不能只确认 lib.rs 编译成功就省略后两种检查。
+
 ### 练习：用测试发现元信息丢失
+
+先读完整契约测试中的三个边界实验：
+
+- `empty_access_panics_and_repeated_take_remains_empty` 区分 `unpack` 和 `take`：前者要求载荷存在，后者允许返回空信封。`catch_unwind` 仅在测试中捕获预期 panic，`AssertUnwindSafe` 是测试对捕获环境的显式声明，不是运行时恢复策略；测试不约束普通 panic 文案。
+- `wrong_downcast_preserves_payload_and_dummy_rejects_metadata` 检查类型认领失败后原消息仍可读取，并检查占位信封不能访问元信息。空的 `Envelope<T>` 有元信息，`DummyEnvelope` 没有，两者不可随意替换。
+- `payload_moves_and_replacements_release_exactly_once` 用实现了 `Drop` 的载荷记录释放次数。`take` 和 `seal` 只移动，不销毁载荷；克隆产生第二个载荷；原地替换释放旧值；最终丢弃两个盒子分别释放剩余载荷。计数器使用 `Arc<AtomicUsize>` 便于所有副本报告到同一位置，这个同步测试没有后台任务，也不需要 sleep。
+
+这些断言来自固定参照版本 `flow-rs/src/envelope/envelope.rs` 中的 `Option::take`、赋值替换、条件克隆和占位信封实现。它们验证本地可观察行为，不意味着已经运行了原版整个工作区。
 
 在导出的副本里，故意将 repack 的新信封元信息改为 Default::default()，再运行测试。
 应当看到元信息保留相关测试失败；修复后恢复通过。不要修改测试期待值来迁就这个错误。

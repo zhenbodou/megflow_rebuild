@@ -368,8 +368,6 @@ pub fn expand_inputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 {
                 parse_quote!(std::collections::HashMap<u64, #endpoint>)
             } else if let Some(payload) = concrete_payload {
                 parse_quote!(flow_rs::channel::ReceiverT<#payload>)
-            } else if spec.array {
-                parse_quote!(Vec<Receiver>)
             } else {
                 parse_quote!(Receiver)
             };
@@ -447,8 +445,6 @@ pub fn expand_outputs(specs: &[PortSpec], mut item: ItemStruct) -> TokenStream2 
                 parse_quote!(std::collections::HashMap<u64, #endpoint>)
             } else if let Some(payload) = concrete_payload {
                 parse_quote!(flow_rs::channel::SenderT<#payload>)
-            } else if spec.array {
-                parse_quote!(Vec<Sender>)
             } else {
                 parse_quote!(Option<Sender>)
             };

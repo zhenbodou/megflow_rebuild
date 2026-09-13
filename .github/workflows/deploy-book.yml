@@ -56,6 +56,11 @@ jobs:
       - name: Validate standalone message chapter
         run: python3 scripts/check_message_course.py
 
+      - name: Validate beginner traits chapter
+        run: python3 scripts/check_traits_course.py
+      - name: Validate beginner ownership chapter
+        run: python3 scripts/check_ownership_course.py
+
       - name: Validate environment chapter from printed files
         run: python3 scripts/check_environment_course.py
 
@@ -76,6 +81,9 @@ jobs:
 
       - name: Validate registry lessons without the runtime
         run: python3 scripts/check_registry_course.py
+
+      - name: Validate macro AST traversal and feature combinations
+        run: python3 scripts/check_macro_composition_course.py
 
       - name: Validate standalone broker chapter
         run: python3 scripts/check_broker_course.py

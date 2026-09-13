@@ -22,7 +22,7 @@
 python3 scripts/check_macro_course.py
 ```
 
-它运行声明宏、Token 和注册表示例，构建三种过程宏的独立阶段工程，并测试进阶 Describe。失败时先看第一个失败命令，避免把网络下载失败误认为 Rust 语法错误。
+它运行声明宏、Token 和注册表示例，构建四个独立检查点：三种过程宏逐步加入，随后在第 4 个检查点验证进阶 Describe。第 7 课的 AST 与 feature 组合另由 `scripts/check_macro_composition_course.py` 验证。失败时先看第一个失败命令，避免把网络下载失败误认为 Rust 语法错误。
 
 ## 工具各管一段流程
 
