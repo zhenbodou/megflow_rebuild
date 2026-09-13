@@ -90,7 +90,7 @@ producer.await 等待的是任务结果 JoinHandle，不是重新执行生产循
 程序应依次输出步骤 1、步骤 2、步骤 3 的说明，最后正常退出。完整实现：
 
 ```rust,ignore
-{{#include ../../../code/flow-rs/examples/async_steps.rs}}
+{{#include ../../../code/flow-rs/examples/async_steps.rs:full}}
 ```
 
 合上代码，自己完成以下变化：

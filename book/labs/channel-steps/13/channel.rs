@@ -119,12 +119,10 @@ pub fn channel_with_type(capacity: usize, channel_type: MsgTypeId) -> (Sender, R
 }
 
 /// 端口声明类型与底层通道类型可以不同，转换表将来负责衔接。
-// ANCHOR: type_info_trait
 pub trait TypeInfo {
     fn port_tid(&self) -> MsgTypeId;
     fn chan_tid(&self) -> MsgTypeId;
 }
-// ANCHOR_END: type_info_trait
 
 impl TypeInfo for Sender {
     fn port_tid(&self) -> MsgTypeId {
@@ -250,7 +248,6 @@ impl Receiver {
         self.inner.is_none()
     }
 
-    // ANCHOR: timed_receive
     /// 原版 try_recv 是限时等待；超时为 Ok(None)，关闭为 Err。
     pub async fn try_recv_any(&self, dur: std::time::Duration) -> Result<Option<SealedEnvelope>> {
         tokio::select! {
@@ -271,9 +268,7 @@ impl Receiver {
             })
         })
     }
-    // ANCHOR_END: timed_receive
 
-    // ANCHOR: batch_receive
     /// n 是累计权重阈值，不是信封数量。超时返回部分成功结果。
     pub async fn batch_recv_any(
         &self,
@@ -324,7 +319,6 @@ impl Receiver {
                 BatchRecvError::Closed(items) => BatchRecvError::Closed(convert(items)),
             })
     }
-    // ANCHOR_END: batch_receive
 
     /// 收一个已封箱的信封（未类型化）。所有 `Sender` 均 drop 且队列排空 →
     /// `Err(ChannelClosed)`。/ Receive an untyped sealed envelope.

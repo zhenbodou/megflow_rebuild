@@ -57,9 +57,9 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
             shutil.copyfile(ROOT / "book/labs" / source, target / destination)
         if step == "12":
             (target / "tests").mkdir(exist_ok=True)
-            shutil.copyfile(ROOT / "code/flow-rs/tests/conversion.rs", target / "tests/conversion.rs")
+            shutil.copyfile(ROOT / "book/labs/channel-steps/12/conversion_test.rs", target / "tests/conversion.rs")
         if step == "12a":
-            shutil.copyfile(ROOT / "code/flow-rs/tests/channel_type_guess.rs", target / "tests/channel_type_guess.rs")
+            shutil.copyfile(ROOT / "book/labs/channel-steps/12a/channel_type_guess.rs", target / "tests/channel_type_guess.rs")
         subprocess.run([
             "cargo", "test", "--manifest-path", str(target / "Cargo.toml"), "--workspace", "--offline"
         ], check=True, timeout=180)

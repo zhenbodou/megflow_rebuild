@@ -54,13 +54,11 @@ derive 中 Copy 允许复制这个小枚举而不移走原值；Eq 与 PartialEq
 
 ## 类型信息：端口类型与通道类型为什么分开
 
-到这里，我们已有 `SenderT<T>` 与 `ReceiverT<T>`。接下来在 `config/interlayer.rs` 定义消息类型描述，并让端点实现 `channel::TypeInfo`。这一层为后续类型推断与转换表准备数据，不会自动转换载荷。
+到这里，我们已有 `SenderT<T>` 与 `ReceiverT<T>`——第十一步你已经在 `config/interlayer.rs` 定义了消息类型描述，并让两种端点实现了 `channel::TypeInfo`。这一节回头把这层设计讲透：它为后续类型推断与转换表准备数据，不会自动转换载荷。
 
 先用一个问题理解需求：节点声明接收 `u32`，但接线系统为队列选择了 `String`。框架至少要记住两件事，才能判断是否存在 String → u32 的转换函数。只记录一个类型，就无法描述这个转换请求。
 
-```rust
-{{#include ../../../code/flow-rs/src/channel.rs:type_info_trait}}
-```
+翻回你在第十一步 `src/channel.rs` 里写的 `TypeInfo` trait：它只声明 `port_tid` 与 `chan_tid` 两个方法，一个回答「端口声明成什么类型」，一个回答「底层队列是什么类型」——正好就是上面那两件必须记住的事。
 
 `port_tid` 描述端口声明：普通端点是 `Any`，`ReceiverT<u32>` 是 Rust 的 u32 类型。`chan_tid` 描述底层通道：类型包装和克隆不会改变它。`Any` 在这里是 MegFlow 枚举的一种值，不是 `std::any::Any` trait，也不代表队列会检查每条消息并改变自己的声明。
 
@@ -78,11 +76,7 @@ derive 中 Copy 允许复制这个小枚举而不移走原值；Eq 与 PartialEq
 
 默认未接线端点也采用 Any。随后给普通端点实现 TypeInfo：`port_tid` 返回 Any，`chan_tid` 返回保存的字段。给类型包装实现同一 trait：`port_tid` 返回 `MsgTypeId::of::<T>()`，`chan_tid` 委托内部端点。
 
-这正是 `tests/type_info.rs` 里的回归测试 `wrapper_type_does_not_relabel_channel`（对容量 0、1 各跑一遍，发送、接收两端都验）：
-
-```rust
-{{#include ../../../code/flow-rs/tests/type_info.rs:wrapper_test}}
-```
+你在第十一步 `src/channel.rs` 的单元测试里已经亲手写过对应的回归测试 `wrapper_does_not_relabel_queue`（容量 1，发送、接收两端都验）：把队列标成 `String`、两端包成 `u32` 端口后，断言 `port_tid()` 是 `u32`、`chan_tid()` 仍是 `String`。（仓库终点另有一份 `tests/type_info.rs::wrapper_type_does_not_relabel_channel`，把容量 0、1 都跑一遍，作用相同。）
 
 `receiver.into()` 只是移动端点到类型包装中，不能把 String 队列重新标成 u32。此时两种类型不同是允许被描述的状态，并不意味着接收已经安全可用。下一节接入转换表；如果没有登记匹配转换且实际载荷不是 u32，类型化接收的 downcast 仍会失败。
 
@@ -137,11 +131,7 @@ HashMap 是标准库的键值表，键是有顺序的二元组 `(源类型, 目�
 
 维护脚本现可连续构建第一至第十二步。以下文字进一步解释直接转换和后续类型选择的规则；自动选择队列类型尚不是第十二步已经写出的功能。
 
-上一节先完成类型描述，现在接入实际转换。创建 `channel/conversion.rs`，定义函数指针：
-
-```rust
-{{#include ../../../code/flow-rs/src/channel/conversion.rs:cvt_f_type}}
-```
+上一节先完成类型描述，现在回头看你在第十二步 `channel/conversion.rs` 里写下的函数指针别名：`pub type CvtF = fn(SealedEnvelope) -> SealedEnvelope;`。
 
 输入和输出都被类型擦除，因为一张注册表需要容纳不同类型的转换函数。函数内部负责 downcast 到已约定的输入类型，取出业务数据，构造目标数据，再封箱返回。转换表无法从这个签名判断函数是否遵守注册的类型约定；错误的注册仍会造成运行错误。
 
@@ -213,7 +203,7 @@ DummyEnvelope 是控制消息，不送入业务转换函数；完整 flush 协�
 完整 **tests/channel_type_guess.rs**：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/channel_type_guess.rs}}
+{{#include ../../labs/channel-steps/12a/channel_type_guess.rs}}
 ```
 
 运行 `cargo test --offline --test channel_type_guess`；全部通过后运行 `cargo test --offline`，保留前十二步的全部测试。维护脚本把这个步骤标为 12a，在第十三步前构建。不要为了选定某个类型而把 HashSet 改成固定遍历顺序：只要候选合法即可，下面会解释原版为何不承诺唯一结果。

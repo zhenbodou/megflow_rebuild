@@ -13,7 +13,7 @@
 完整 **tests/conversion.rs**：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/conversion.rs}}
+{{#include ../../labs/channel-steps/12/conversion_test.rs}}
 ```
 
 在当前 flow-rs 目录运行 `cargo test --offline --test conversion`，预期 3 项测试通过。先阅读下面的信号顺序说明，再逐个运行对应测试；不要把整个文件当成需要一次背下来的并发代码。维护脚本也会在第十二步的累计工程运行这份测试，确认没有隐含后续依赖。

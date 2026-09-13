@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! 不依赖任何第三方 crate：把“值 → 信封 → 业务变换 → 类型擦除”逐步连接起来。
 use flow_message::{Envelope, EnvelopeInfo};
 
@@ -43,3 +44,4 @@ fn main() {
     // ANCHOR_END: erased_payload
     println!("完成：业务转换、元信息保留、取出载荷、类型擦除与安全恢复");
 }
+// ANCHOR_END: full

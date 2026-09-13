@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! 异步入门：每步只观察一个机制，先用 Tokio 原生队列再回到引擎封装。
 use std::cell::Cell;
 use tokio::sync::mpsc;
@@ -49,3 +50,4 @@ async fn main() {
     // ANCHOR_END: shutdown
     println!("步骤 3：并发收发得到 [30, 40, 50]，全部发送端释放后正常退出");
 }
+// ANCHOR_END: full

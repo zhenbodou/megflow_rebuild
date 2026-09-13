@@ -322,7 +322,7 @@ megflow-message-chapter/
 `examples/first_principles.rs`（逐步从普通值走到类型擦除）：
 
 ```rust
-{{#include ../../../code/flow-message/examples/first_principles.rs}}
+{{#include ../../../code/flow-message/examples/first_principles.rs:full}}
 ```
 
 保存这些文件后，在新工程目录执行 `cargo test --offline` 和 `cargo run --offline --example first_principles`。库入口负责公开类型；单元测试可以访问模块内部，集成测试只能访问公开 API；example 则是使用这个库的独立可执行目标。三者用途不同，不能只确认 lib.rs 编译成功就省略后两种检查。

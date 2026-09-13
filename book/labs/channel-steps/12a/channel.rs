@@ -391,7 +391,6 @@ pub trait TypeInfo {
     fn port_tid(&self) -> MsgTypeId;
     fn chan_tid(&self) -> MsgTypeId;
 }
-// ANCHOR_END: type_info_trait
 
 impl TypeInfo for Sender {
     fn port_tid(&self) -> MsgTypeId {
