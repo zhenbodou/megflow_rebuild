@@ -24,9 +24,15 @@ with tempfile.TemporaryDirectory(prefix='megflow-message-course-') as directory:
     shutil.rmtree(envelope / 'tests')
     shutil.rmtree(envelope / 'examples')
     (envelope / 'src/lib.rs').write_text((root / 'book/labs/envelope/step-lib.rs').read_text())
-    for step in ('01', '02'):
+    for step in ('01', '02', '03', '04', '05'):
         (envelope / 'src/envelope.rs').write_text((root / f'book/labs/envelope/step{step}.rs').read_text())
         subprocess.run(['cargo', 'test', '--offline', '--manifest-path', str(envelope / 'Cargo.toml')], check=True, timeout=120)
+    # 防漂移：step05 学习版必须逐字等于仓库终点 envelope.rs（去掉 ANCHOR 标记行后相等），
+    # 锁死「书里手写的最后一步」与「code/ 里的成品」永不脱节。
+    step05_source = (root / 'book/labs/envelope/step05.rs').read_text()
+    strip = lambda text: [line for line in text.splitlines() if 'ANCHOR' not in line]
+    assert strip(step05_source) == strip(final_source), \
+        'step05.rs 已与 code/flow-message/src/envelope.rs 漂移（去 ANCHOR 行后不一致）'
     (envelope / 'src/envelope.rs').write_text(final_source)
     (envelope / 'src/lib.rs').write_text(final_lib)
     (envelope / 'tests').mkdir()

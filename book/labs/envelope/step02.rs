@@ -5,23 +5,23 @@ pub struct EnvelopeInfo {
 
 pub struct Envelope<M> {
     info: EnvelopeInfo,
-    message: Option<M>,
+    msg: Option<M>,
 }
 
 impl<M> Envelope<M> {
-    pub fn new(message: M) -> Self {
+    pub fn new(msg: M) -> Self {
         Self {
             info: EnvelopeInfo::default(),
-            message: Some(message),
+            msg: Some(msg),
         }
     }
 
     pub fn unpack(&mut self) -> M {
-        self.message.take().expect("envelope has no message")
+        self.msg.take().expect("envelope has no message")
     }
 
     pub fn is_none(&self) -> bool {
-        self.message.is_none()
+        self.msg.is_none()
     }
     pub fn info(&self) -> &EnvelopeInfo {
         &self.info
@@ -30,10 +30,10 @@ impl<M> Envelope<M> {
         &mut self.info
     }
 
-    pub fn repack<T>(&self, message: T) -> Envelope<T> {
+    pub fn repack<T>(&self, msg: T) -> Envelope<T> {
         Envelope {
             info: self.info.clone(),
-            message: Some(message),
+            msg: Some(msg),
         }
     }
 }

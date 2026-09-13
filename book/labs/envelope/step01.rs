@@ -1,20 +1,20 @@
 pub struct Envelope<M> {
-    message: Option<M>,
+    msg: Option<M>,
 }
 
 impl<M> Envelope<M> {
-    pub fn new(message: M) -> Self {
+    pub fn new(msg: M) -> Self {
         Self {
-            message: Some(message),
+            msg: Some(msg),
         }
     }
 
     pub fn unpack(&mut self) -> M {
-        self.message.take().expect("envelope has no message")
+        self.msg.take().expect("envelope has no message")
     }
 
     pub fn is_none(&self) -> bool {
-        self.message.is_none()
+        self.msg.is_none()
     }
 }
 
