@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! flow-rs · tests/dyn_wiring_e2e —— Ch4.9b：config 认识 `dyn` 连接后的**自动接线**端到端契约。
 //!
 //! 与 tests/dyn_ports.rs 的区别在于「谁来接线」：那边手搓 `DynPorts` + 手挂 broker 订阅，显式
@@ -302,3 +303,4 @@ connections = [
     );
 }
 // ANCHOR_END: validation
+// ANCHOR_END: full

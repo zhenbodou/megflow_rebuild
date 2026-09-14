@@ -101,7 +101,7 @@ macro-labs/
 `derive/src/lib.rs` 完整内容：
 
 ```rust
-{{#include ../../../code/macro-labs/derive/src/lib.rs}}
+{{#include ../../../code/macro-labs/derive/src/lib.rs:full}}
 ```
 
 按以下次序核对：文件顶部公共导入；三种已有宏；Describe 的编译器入口；接收 DeriveInput 的普通生成函数；最后是生成器单元测试。`#[cfg(test)]` 中的测试只在 cargo test 时编译，不会随应用运行。

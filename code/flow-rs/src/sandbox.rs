@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! flow-rs · sandbox —— 单节点测试沙箱（Ch3.4）。
 //!
 //! 想单独验一个节点「喂这些、该吐那些」，走完整 `Builder` 得写一整段 TOML（`main`、
@@ -349,3 +350,4 @@ impl Sandbox {
         }
     }
 }
+// ANCHOR_END: full

@@ -76,7 +76,7 @@ flowchart LR
 新建 `code/flow-rs/src/dyn_ports.rs`。三个类型分别是：广播载荷 `DynConns`（边界端点句柄）、惰性构造器 + 广播信道配置 `DynPortsConfig`（教学子集直接持目标 `GraphConfig` 当构造器），以及句柄 + 实例缓存 `DynPorts<V>`。`create` 在 `impl<V>` 上（与 `V` 无关），`fetch` 系列按端点归属分入口/出口——本章路由只用无类型的 `impl DynPorts<Sender>`（抽入口）/ `impl DynPorts<Receiver>`（抽出口）。四个特化（含类型化两支）方法体相同，已用一个本地 `dyn_fetch_methods!` 宏统一生成（对标原版 `port_impl!`）；宏机制与类型化特化的讲解见 [Ch4.9a](ch09a-derive-dyn-ports.md)。完整文件如下，可直接对照逐段输入：
 
 ```rust,ignore
-{{#include ../../../code/flow-rs/src/dyn_ports.rs}}
+{{#include ../../../code/flow-rs/src/dyn_ports.rs:full}}
 ```
 
 `create` 里 `MainGraph::assemble_graph(&cfg.graph_config, resources)?` 就是 §3 那个复用入口。采集端点时先 `*_names()` 拿到的 `&str` 名 `.map(str::to_owned)` own 下来断开对实例的借用，再遍历 `input()`（克隆 `Sender`）/ `take_output()`（移出 `Receiver`）——这几个边界访问器 [Ch3.3](../part3/ch02-graph-builder.md) 已是 `MainGraph` 的公开 API，无需新增。`publish` 广播的 `DynConns` 里，入口是克隆、出口是移出的那一份，故 `instance` 变量在函数尾 drop 安全。

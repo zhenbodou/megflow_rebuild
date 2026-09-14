@@ -1,3 +1,4 @@
+// ANCHOR: full
 // ANCHOR: schema
 use serde::Deserialize;
 
@@ -94,3 +95,4 @@ fn main() {
     }
 }
 // ANCHOR_END: experiment
+// ANCHOR_END: full

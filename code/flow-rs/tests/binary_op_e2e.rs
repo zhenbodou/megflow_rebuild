@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! 集成测试：Ch3.4 大里程碑——真实内置节点 `BinaryOp`，端到端跑通 `1 + 2 == 3`。
 //!
 //! 与前几章的测试不同，这里**不再自己定义节点**：`BinaryOp` 已是 flow-rs 随 crate 发货
@@ -175,3 +176,4 @@ async fn all_operations_preserve_left_envelope_metadata() {
     .expect("图应在五秒内完成四种运算并退出");
 }
 // ANCHOR_END: metadata_test
+// ANCHOR_END: full

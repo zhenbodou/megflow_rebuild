@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! 注册原理第一步：只用标准库，先不涉及 inventory、TOML 或异步调度。
 // ANCHOR: operation
 trait Operation {
@@ -47,3 +48,4 @@ fn main() {
     // ANCHOR_END: independent_instances
     println!("注册原理通过：按名查构造器、独立实例、不同类型统一调用、未知名称报错");
 }
+// ANCHOR_END: full

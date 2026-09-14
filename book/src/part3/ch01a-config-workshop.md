@@ -122,7 +122,7 @@ python3 scripts/check_config_course.py
 前面各步拼接后的 `src/main.rs` 完整内容如下。用它核对文件顺序和唯一的 main 入口；替换整份文件后仍运行同一个 `cargo run`，不依赖框架模块。
 
 ```rust
-{{#include ../../../code/flow-rs/examples/config_steps.rs}}
+{{#include ../../../code/flow-rs/examples/config_steps.rs:full}}
 ```
 
 现在可以解释 Builder 的输入，但我们还没有生成运行图。接下来需要根据注册表取得输入、输出端口信息，再验证 `add:a` 指向实际节点的输入端口、分配 channel、把端点交给构造器。`String` 无法表达这些跨对象关系。

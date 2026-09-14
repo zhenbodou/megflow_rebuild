@@ -223,11 +223,11 @@ test closed_output_does_not_stop_consuming_input_pairs ... ok
 下面给出本章端到端测试文件的完整内容，包含前面片段省略的导入、配置常量和所有测试。将它写入 `code/flow-rs/tests/binary_op_e2e.rs` 后运行上面的命令。
 
 ```rust
-{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs}}
+{{#include ../../../code/flow-rs/tests/binary_op_e2e.rs:full}}
 ```
 
 下面是 Sandbox 的完整当前实现，用来核对前面分段解释的构造、回调登记、端口转移与任务收尾。它已包含后续标签端口的接入，不能把完整当前文件的编译成功当成 Ch3.4 从前一章累计构建成功。
 
 ```rust
-{{#include ../../../code/flow-rs/src/sandbox.rs}}
+{{#include ../../../code/flow-rs/src/sandbox.rs:full}}
 ```

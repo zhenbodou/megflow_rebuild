@@ -139,7 +139,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --test dyn_demux_graph --l
 下面是 `code/flow-rs/tests/dyn_demux_graph.rs` 的完整内容，包含资源、Probe、配置、全部导入以及两个测试。按前文讲解逐段填写后，用这份完整文件检查是否漏掉注册或辅助代码。
 
 ```rust
-{{#include ../../../code/flow-rs/tests/dyn_demux_graph.rs}}
+{{#include ../../../code/flow-rs/tests/dyn_demux_graph.rs:full}}
 ```
 
 本章测试的观察量要分别解释：初始化次数证明创建数量；载荷日志证明消息到达；等待图句柄与超时证明这个正常场景能结束。若日志没有记录实例 key，就不能仅凭载荷集合证明每一条都进入了正确 key 的实例；应另用 Ch4.9b 的有状态分 key 场景验证，进一步增强本测试时也应记录归属，而不是只增加消息条数。

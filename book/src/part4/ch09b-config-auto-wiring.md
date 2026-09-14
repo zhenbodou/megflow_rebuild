@@ -154,7 +154,7 @@ cargo test --manifest-path code/Cargo.toml -p flow-rs --locked
 本章前面的代码块分别解释夹具、配置和断言，下面给出 `code/flow-rs/tests/dyn_wiring_e2e.rs` 的完整内容，包含全部导入与辅助函数：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/dyn_wiring_e2e.rs}}
+{{#include ../../../code/flow-rs/tests/dyn_wiring_e2e.rs:full}}
 ```
 
 运行前先沿一条连接手工填写四个名字：持有动态字段的节点名、该字段名、作为 topic 的子图位点名、作为 target 的边界端口名。前两个决定配置注入到哪里，后两个决定从哪个通知队列取出哪个端点。它们都是 String，但不能互换。

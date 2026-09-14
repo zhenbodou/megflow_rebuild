@@ -157,7 +157,7 @@ cargo test --manifest-path code/Cargo.toml --workspace --locked
 前面的片段未包含导入、SUB_TRANSFORM 常量和 subgraph 辅助函数。下面给出 `code/flow-rs/tests/dyn_port_derive.rs` 完整内容，保存整份文件后即可执行本节第一条命令：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/dyn_port_derive.rs}}
+{{#include ../../../code/flow-rs/tests/dyn_port_derive.rs:full}}
 ```
 
 预期 `derive_dyn_output_injects_then_round_trips`、`derive_dyn_output_with_concrete_payload_is_typed`、`derive_dyn_inputs_receive_from_instance_outputs` 三项通过，退出码 0。每项均设三秒超时，并等待实例和 Broker 退出；不以 sleep 猜测队列是否处理完。

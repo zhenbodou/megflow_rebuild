@@ -1,3 +1,4 @@
+// ANCHOR: full
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::punctuated::Punctuated;
@@ -181,3 +182,4 @@ mod tests {
         }
     }
 }
+// ANCHOR_END: full

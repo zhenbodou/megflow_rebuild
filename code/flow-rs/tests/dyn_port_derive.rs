@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! flow-rs · tests/dyn_port_derive —— Ch4.9a 派生宏 `dyn` 端口的编译期契约 + `set_port_dynamic` 派发。
 //!
 //! Ch4.9（机制层）里，触发方要手搓 `DynPorts::<Sender>::new(cfg)` 显式装配动态端口。本章让
@@ -297,3 +298,4 @@ async fn derive_dyn_inputs_receive_from_instance_outputs() {
     .await
     .unwrap();
 }
+// ANCHOR_END: full

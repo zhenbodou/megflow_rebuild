@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! flow-rs · tests/dyn_demux_graph —— Ch4.9c：注册版 `DynDemux` 装进**真实 TOML 图**的端到端契约。
 //!
 //! 与 tests/dyn_wiring_e2e.rs 的区别在于「触发方是谁」：那边触发节点 `AutoTrigger` 是**测试
@@ -220,3 +221,4 @@ async fn dyn_demux_runs_in_sandbox() {
     .expect("sandbox dyn demux timed out");
 }
 // ANCHOR_END: sandbox
+// ANCHOR_END: full

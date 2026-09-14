@@ -58,7 +58,7 @@ iter 遍历引用，find 返回 `Option<&Registration>`，找不到是 None。ok
 本课只新增一个 `main.rs`，没有 Cargo 依赖。前面分段内容合起来的完整文件如下：
 
 ```rust
-{{#include ../../../code/flow-rs/examples/registry_from_functions.rs}}
+{{#include ../../../code/flow-rs/examples/registry_from_functions.rs:full}}
 ```
 
 在空目录把它保存为 `main.rs`，执行：

@@ -1,3 +1,4 @@
+// ANCHOR: full
 //! flow-rs · dyn_ports —— 运行期**动态子图实例**（Ch4.9，机制层）。
 //!
 //! 原版 MegFlow 没有「动态子图节点类型」，而是一条运行期环路：子图作为**惰性构造器**
@@ -345,3 +346,4 @@ impl<T: Clone + 'static> DynPorts<ReceiverT<T>> {
     dyn_fetch_methods!(ReceiverT<T>, outputs, "output");
 }
 // ANCHOR_END: dyn_ports_typed
+// ANCHOR_END: full
