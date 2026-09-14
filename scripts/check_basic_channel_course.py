@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
         "python3", str(ROOT / "scripts/message_checkpoint.py"), "--stage", "envelope", "--out", str(target / "message")
     ], check=True, timeout=60)
     shutil.copyfile(ROOT / "code/Cargo.lock", target / "Cargo.lock")
-    for step in ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "12a", "13", "14", "15", "16"):
+    for step in ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "12a", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22"):
         if step in ("01", "02", "03"):
             files = {"Cargo.toml": f"channel-steps/{step}/Cargo.toml",
                      "src/lib.rs": f"channel-steps/{step}/lib.rs"}
@@ -34,6 +34,26 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
                      "src/node.rs": "node-steps/16/node.rs",
                      "derive/Cargo.toml": "node-steps/16/derive-Cargo.toml",
                      "derive/src/lib.rs": "node-steps/16/derive-lib.rs"}
+        elif step in ("17", "18", "19", "20"):
+            # 沿用 step16 的 Cargo.toml / lib.rs / derive/Cargo.toml（累积保留），
+            # 每步只覆盖 node.rs（Doubler 用上新宏）与 derive/src/lib.rs（宏本身长出新能力）。
+            files = {"src/node.rs": f"node-steps/{step}/node.rs",
+                     "derive/src/lib.rs": f"node-steps/{step}/derive-lib.rs"}
+        elif step == "21":
+            # Ch2.4 注册表第一步：给 flow-rs 加 inventory 依赖 + registry 模块（表 + BuildFromPorts
+            # 契约）+ derive(BuildFromPorts) 宏。node.rs 沿用第二十步（累积保留、不覆盖）；
+            # 新增独立集成测试 tests/register.rs，先直接 build() 跑通。
+            files = {"Cargo.toml": "node-steps/21/Cargo.toml",
+                     "src/lib.rs": "node-steps/21/lib.rs",
+                     "src/registry.rs": "node-steps/21/registry.rs",
+                     "derive/src/lib.rs": "node-steps/21/derive-lib.rs",
+                     "tests/register.rs": "node-steps/21/register.rs"}
+        elif step == "22":
+            # Ch2.4 注册表第二步：加函数式宏 node_register!（第三种宏形态）。Cargo.toml / lib.rs /
+            # registry.rs / node.rs 全沿用第二十一步；只覆盖 derive/src/lib.rs 与 tests/register.rs
+            # （后者补上 node_register! + 按名字查找/构造/运行的端到端测试）。
+            files = {"derive/src/lib.rs": "node-steps/22/derive-lib.rs",
+                     "tests/register.rs": "node-steps/22/register.rs"}
         else:
             files = {"src/channel.rs": f"channel-steps/{step}/channel.rs"}
             if step == "08":
@@ -64,4 +84,4 @@ with tempfile.TemporaryDirectory(prefix="megflow-basic-channel-") as directory:
             "cargo", "test", "--manifest-path", str(target / "Cargo.toml"), "--workspace", "--offline"
         ], check=True, timeout=180)
         print(f"通道第 {step} 步通过", flush=True)
-print("通道到首个节点宏：同一工程十六步及 12a 补充构建通过。")
+print("通道到过程宏五件套 + 编译期注册表：同一工程二十二步及 12a 补充构建通过。")

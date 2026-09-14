@@ -2,7 +2,7 @@
 
 Ch2.3 我们把节点样板集中为几行声明。但还差最后一环：写好的节点，引擎怎么**发现**它？图配置里只写类型名字符串 `"Doubler"`，引擎得据此把节点**造出来**。本章用函数式过程宏生成注册条目，再由 inventory 的平台初始化机制登记，运行时按名字查构造器。宏展开、登记和创建业务对象发生在不同阶段。
 
-先完成 [注册表实作](ch04b-registry-workshop.md)，手写名字到构造器的表，再理解 inventory 的分散登记。
+本章续着 Ch2.3 的累积工程往下写——起点是第二十步（五宏塌缩完成的 `Doubler`），第二十一~二十二步给它加上注册表：**第二十一步**立「表 + `BuildFromPorts` 契约 + 派生宏」，**第二十二步**加函数式宏 `node_register!`、走通「按名字查出来跑」。每步都是一份**可编译、自带测试**的文件，抄进工程跑通再走下一步。想先手写一遍名字到构造器的表、再理解 inventory 的分散登记，可选读 [注册表实作](ch04b-registry-workshop.md)。
 
 <!-- toc -->
 
@@ -94,87 +94,30 @@ inventory = "0.3"
 
 ### 从独立登记转到节点构造
 
-先定义「一条注册条目」和这张表。全在新模块 `flow-rs/src/registry.rs`（**本章阶段示意**：终点源码的 `NodeRegistration`/`NodeCtor` 会长出更多字段，见下方落差说明）：
+先定义「一条注册条目」和这张表。它们全在累积工程的新模块 `src/registry.rs` 里（**本章阶段示意**：终点源码的 `NodeRegistration`/`NodeCtor` 会长出更多字段，见下方落差说明）——模块顶部先 `use crate::channel::{Receiver, Sender};` 和 `use crate::node::Actor;` 引入端口类型与 `Actor`：
 
-```rust,ignore
-use crate::channel::{Receiver, Sender};
-use crate::node::Actor;
-
-/// 节点构造器：吃一串输入端口 + 一串输出端口，产出类型擦除的 Box<dyn Actor>。
-pub type NodeCtor = fn(Vec<Receiver>, Vec<Sender>) -> Box<dyn Actor>;
-
-/// 注册表里的一条条目：类型名 + 构造器。
-pub struct NodeRegistration {
-    pub name: &'static str,
-    pub ctor: NodeCtor,
-}
-
-// 声明「本 crate 收集 NodeRegistration 条目」。必须与被收集类型同 crate、在 item 位置。
-inventory::collect!(NodeRegistration);
-
-/// 枚举所有已注册节点。
-pub fn registrations() -> impl Iterator<Item = &'static NodeRegistration> {
-    inventory::iter::<NodeRegistration>.into_iter()
-}
-
-/// 按类型名查一条注册。Part 3 的 Graph Builder 会用它把 TOML 类型名解析成构造器。
-pub fn find(name: &str) -> Option<&'static NodeRegistration> {
-    registrations().find(|r| r.name == name)
-}
+```rust
+{{#include ../../labs/node-steps/21/registry.rs:table}}
 ```
 
 > **与终点源码的落差**：`inventory::collect!` / `registrations` / `find` 三者到终点**一字未改**，可放心照抄。但 `NodeRegistration` 与 `NodeCtor` 会随后续章节**长出更多字段**——Ch3.2 给 `NodeCtor` 加了 `&Args` 入参并把返回改成 `Result`（配置驱动 + 建图期报错）、给条目加了 `inputs`/`outputs` 端口名表；Ch4.2 又把端口从一维 `Vec` 升成分组 `Vec<Vec<_>>`（数组端口）、加了 `input_array`/`output_array` 标记表；Ch4.3 还并列加了一张**资源**注册表 `ResourceRegistration`。完整终点见 `code/flow-rs/src/registry.rs`。本章先把「名字 → 构造器」这条主干立住，字段的生长留给后面各章按需引入。
 
-两个值得停下的点：
-
-**① `NodeCtor` 为什么是裸函数指针 `fn(..)`，而不是 `Box<dyn Fn(..)>`？** 因为 `NodeRegistration` 要能在 `submit!` 的 **`static` 上下文里 const 构造**。函数指针（指向一个具体的 `build` 函数）是 const 值；`Box<dyn Fn>` 需要堆分配，不是 const。用 `fn` 指针，条目可以静态保存。
-
-**② `collect!` 的位置约束。** 它必须写在**定义 `NodeRegistration` 的 crate**（flow-rs）里、模块级。这是 inventory 的硬性要求——收集点与类型定义绑定。下游 crate 只 `submit!`，不 `collect!`。
+代码里的两处文档注释已点明关键：`NodeCtor` 用**裸函数指针** `fn(..)` 而非 `Box<dyn Fn(..)>`，是为了让 `NodeRegistration` 能在 `submit!` 的 **`static` 上下文里 const 构造**——函数指针（指向某个具体的 `build`）是 const 值，`Box<dyn Fn>` 要堆分配、不是 const；而 `inventory::collect!` 必须写在**定义 `NodeRegistration` 的 crate**（本累积工程）里、模块级——收集点与类型定义绑定，下游 crate 只 `submit!`、不 `collect!`。
 
 ## 4. `BuildFromPorts`：位置接线的构造器
 
 `NodeCtor` 的签名是 `fn(Vec<Receiver>, Vec<Sender>) -> Box<dyn Actor>`——给一串端口，造一个节点。但每个节点的字段不同（`Doubler` 是 `inp`/`out`/`input_closed`），谁来把端口**填进**对应字段？这又是一件该由宏生成的样板。我们定义一个 trait，再用派生宏生成它（**本章阶段示意**：终点 `build` 会带 `&Args` 入参、返回 `Result`、端口分组成 `Vec<Vec<_>>`，见 §5 末落差说明与 `code/flow-rs/src/registry.rs`）：
 
-```rust,ignore
-pub trait BuildFromPorts {
-    fn build(ins: Vec<Receiver>, outs: Vec<Sender>) -> Box<dyn Actor>;
-}
+```rust
+{{#include ../../labs/node-steps/21/registry.rs:build_from_ports}}
 ```
 
-> **为什么不加 `where Self: Sized`？** 一个没有 `self` 接收者的关联函数，会让 trait 不对象安全（除非加 `Self: Sized`）。但我们从不需要 `dyn BuildFromPorts`——只以 `<Doubler as BuildFromPorts>::build` 对**具体类型**取函数指针。既然不 dyn，就不必加那句仪式。
+trait 上的文档注释解释了**为什么不加 `where Self: Sized`**：`build` 没有 `self` 接收者，本会让 trait 不对象安全（除非补 `Self: Sized`）；但我们从不需要 `dyn BuildFromPorts`——只对具体类型取 `<Doubler as BuildFromPorts>::build` 这个函数指针，既然不 dyn，就不必加那句仪式。
 
-`#[derive(BuildFromPorts)]` 生成 `build` 的逻辑，和 Ch2.3 的 `#[derive(Node)]` 一样**按字段类型/名字分类**——只是这次是往字段里**填**端口，而非撤（**本章阶段示意**：终点用 `port_kind` 精确分类、并处理数组/字典/类型化/参数字段，见 §5 末落差说明）：
+`#[derive(BuildFromPorts)]` 生成 `build` 的逻辑，和 Ch2.3 的 `#[derive(Node)]` 一样**按字段类型分类**——而且**直接复用第十八步写的精确分类** `is_output_port`（恰好 `Option<Sender>`）/ `type_is`（恰好 `Receiver`，不靠字符串包含），只是方向相反：`derive(Node)` 在 `close` 里把输出端口**撤**成 `None`，这里在 `build` 里把端口**填**进字段（**本章阶段示意**：终点用 `port_kind` 精确分类、并处理数组/字典/类型化/参数字段，见 §5 末落差说明）：
 
-```rust,ignore
-pub fn expand_build_from_ports(input: &DeriveInput) -> TokenStream2 {
-    let name = &input.ident;
-    let (ig, tg, wc) = input.generics.split_for_impl();
-
-    let mut inits = Vec::new();
-    if let Data::Struct(data) = &input.data {
-        for f in data.fields.iter() {
-            let Some(id) = &f.ident else { continue };
-            let init = if type_contains(&f.ty, "Sender") {
-                quote! { Some(outs.remove(0)) }      // 输出端口：取一个 Sender，包 Some
-            } else if type_contains(&f.ty, "Receiver") {
-                quote! { ins.remove(0) }             // 输入端口：取一个 Receiver
-            } else if *id == "input_closed" {
-                quote! { false }                     // 关闭标志：初值 false
-            } else {
-                quote! { Default::default() }        // 其余字段：默认值
-            };
-            inits.push(quote! { #id: #init });
-        }
-    }
-
-    quote! {
-        impl #ig BuildFromPorts for #name #tg #wc {
-            fn build(mut ins: Vec<Receiver>, mut outs: Vec<Sender>) -> Box<dyn Actor> {
-                Box::new(#name { #( #inits ),* })
-            }
-        }
-    }
-}
+```rust
+{{#include ../../labs/node-steps/21/derive-lib.rs:expand_build_from_ports}}
 ```
 
 对 `Doubler` 它生成：
@@ -201,34 +144,25 @@ impl BuildFromPorts for Doubler {
 
 Ch2.2/2.3 我们写了派生宏和属性宏。过程宏还有第三种形态——**函数式宏**（function-like macro，形如 `foo!(...)`）。`node_register!("Doubler", Doubler)` 就是它：把一条注册**提交**进表。
 
-函数式宏的入口用 `#[proc_macro]`（不是 `#[proc_macro_derive]`/`#[proc_macro_attribute]`），且它的输入是**任意 token 流**——没有现成的 `DeriveInput`/`ItemStruct` 可解析，得**自己定义语法**。我们要解析的是 `"名字", 类型路径`，于是自定义一个 `Parse`（真实源码取自 `code/flow-derive/src/node.rs`，这一段到终点未改）：
+函数式宏的入口用 `#[proc_macro]`（不是 `#[proc_macro_derive]`/`#[proc_macro_attribute]`），且它的输入是**任意 token 流**——没有现成的 `DeriveInput`/`ItemStruct` 可解析，得**自己定义语法**。我们要解析的是 `"名字", 类型路径`，于是自定义一个 `Parse`：
 
 ```rust
-{{#include ../../../code/flow-derive/src/node.rs:node_register_args}}
+{{#include ../../labs/node-steps/22/derive-lib.rs:node_register_args}}
 ```
 
-> 这正是 Ch2.3 里「`Field` 不实现 `Parse`」那条经验的另一面：syn 里 `LitStr`、`Path`、`Token![,]` **都实现了 `Parse`**，可以直接 `input.parse()`。自定义 `Parse` 就是把这些基础件按你的语法拼起来。入口处用 `parse_macro_input!(input as node::NodeRegisterArgs)` 驱动它。
+> 这正是 Ch2.3 里「`Field` 不实现 `Parse`」那条经验的另一面：syn 里 `LitStr`、`Path`、`Token![,]` **都实现了 `Parse`**，可以直接 `input.parse()`。自定义 `Parse` 就是把这些基础件按你的语法拼起来。入口处用 `parse_macro_input!(input as NodeRegisterArgs)` 驱动它。
+>
+> **教学版这里是非 pub 的 `struct`**：`proc-macro` crate 的**根**（`derive/src/lib.rs`）不能导出宏以外的公有项，而教学版把宏入口与展开逻辑合在这一个文件里，所以解析器结构体只能非 pub（反正同文件内用，本就不需要 pub）。终点 `code/flow-derive/` 把它挪进 `node` 子模块，才写成 `pub struct`，供入口 `parse_macro_input!(input as node::NodeRegisterArgs)` 跨模块引用。
 
 拿到 `name`/`ty` 后，生成一个 `submit!`（**本章阶段示意**：终点的条目还带端口名表 `INPUTS`/`OUTPUTS`、数组标记 `INPUT_ARRAY`/`OUTPUT_ARRAY`、类型表等字段，见下方落差说明）：
 
-```rust,ignore
-pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
-    let name = &args.name;
-    let ty = &args.ty;
-    quote! {
-        flow_rs::inventory::submit! {
-            flow_rs::registry::NodeRegistration {
-                name: #name,
-                ctor: <#ty as flow_rs::registry::BuildFromPorts>::build,
-            }
-        }
-    }
-}
+```rust
+{{#include ../../labs/node-steps/22/derive-lib.rs:expand_node_register}}
 ```
 
 `ctor` 那行是点睛：`<Doubler as BuildFromPorts>::build` 是个**函数项**，在 `ctor: NodeCtor`（fn 指针）的位置会自动强制成 fn 指针——于是条目 const 可构造、可作为静态条目。
 
-> **§3~§5 与终点源码的落差小结**：本章为把「编译期分布式注册」这条主干讲清，`NodeCtor` / `NodeRegistration` / `BuildFromPorts::build` / `expand_build_from_ports` / `expand_node_register` 五处都用了**Ch2.4 阶段的单端口简化形态**（端口是一维位置 `Vec`、无参数、`build` 不返回 `Result`）。终点 `code/flow-rs/src/registry.rs` 与 `code/flow-derive/src/node.rs` 里它们已升级为：`build(&Args, Vec<Vec<Receiver>>, Vec<Vec<Sender>>) -> Result<..>`（Ch3.2 配置驱动 + Ch4.2 分组数组端口），条目并列 `INPUTS`/`OUTPUTS`/`INPUT_ARRAY`/`OUTPUT_ARRAY`/类型表，`node_register!` 一并提交这些字段，另有对偶的资源注册表（Ch4.3）。差异按章逐步引入，此处只需理解 inventory 主干；`NodeRegisterArgs` 解析器（上方 include）则到终点未变。
+> **§3~§5 与终点源码的落差小结**：本章为把「编译期分布式注册」这条主干讲清，`NodeCtor` / `NodeRegistration` / `BuildFromPorts::build` / `expand_build_from_ports` / `expand_node_register` 五处都用了**Ch2.4 阶段的单端口简化形态**（端口是一维位置 `Vec`、无参数、`build` 不返回 `Result`）。终点 `code/flow-rs/src/registry.rs` 与 `code/flow-derive/src/node.rs` 里它们已升级为：`build(&Args, Vec<Vec<Receiver>>, Vec<Vec<Sender>>) -> Result<..>`（Ch3.2 配置驱动 + Ch4.2 分组数组端口），条目并列 `INPUTS`/`OUTPUTS`/`INPUT_ARRAY`/`OUTPUT_ARRAY`/类型表，`node_register!` 一并提交这些字段，另有对偶的资源注册表（Ch4.3）。差异按章逐步引入，此处只需理解 inventory 主干；`NodeRegisterArgs` 解析器的解析逻辑到终点未变，只是终点把它挪进 `node` 子模块、写成 `pub struct`（见上）。
 
 **卫生化：这里用绝对路径 `flow_rs::`，而 Ch2.3 派生宏用裸名。** 为什么不一致？
 
@@ -241,49 +175,52 @@ pub fn expand_node_register(args: &NodeRegisterArgs) -> TokenStream2 {
 
 ## 6. 端到端：注册 → 查找 → 构造 → 运行
 
-集成测试 `flow-rs/tests/register.rs` 把整条链走通。节点定义和 Ch2.3 一模一样，只多挂一个 `#[derive(BuildFromPorts)]` 和一行 `node_register!`（真实源码取自 `code/flow-rs/tests/register.rs`）：
+集成测试 `tests/register.rs`（累积工程里的独立测试 crate，扮演「下游使用者」）把整条链走通。节点定义和 Ch2.3 一模一样，只多挂一个 `#[derive(BuildFromPorts)]` 和一行 `node_register!`：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/register.rs:node_def}}
+{{#include ../../labs/node-steps/22/register.rs:node_def}}
 ```
 
-然后**只凭字符串**把它造出来跑（真实源码同上）：
+然后**只凭字符串**把它造出来跑：
 
 ```rust
-{{#include ../../../code/flow-rs/tests/register.rs:lookup}}
+{{#include ../../labs/node-steps/22/register.rs:lookup}}
 ```
 
 `find("Doubler")` 命中的，正是 `node_register!` 生成并随应用链接、初始化登记的那条。这就是 Part 3 Graph Builder 的底座：**它拿到 TOML 里的类型名，`find` 出构造器，把节点造出来接进图**。
 
-> **一处落差**：include 的真实测试里 `(reg.ctor)(&flow_rs::config::Args::new(), vec![vec![in_rx]], vec![vec![out_tx]])`——构造器多了 `&Args` 入参（Ch3.2）、端口按分组 `vec![vec![..]]` 传（Ch4.2 数组端口），`start(Context::anonymous())` 带了空上下文（Ch4.3）。本章的心智模型里 `ctor` 还是 `(vec![in_rx], vec![out_tx])`、`start()` 无参；这些多出来的参数读作「后续章节引入的占位」即可，主干「名字 → 构造器 → 跑出 `[2,4,6]`」完全一致。
+> **与终点的落差**：上面正文里 `ctor` 的签名就是主干形态——`(reg.ctor)(vec![in_rx], vec![out_tx])`、`node.start()` 无参。全书终点 `code/flow-rs/tests/register.rs` 里它会长成 `(reg.ctor)(&flow_rs::config::Args::new(), vec![vec![in_rx]], vec![vec![out_tx]])`——构造器多了 `&Args` 入参（Ch3.2）、端口按分组 `vec![vec![..]]` 传（Ch4.2 数组端口）、`start(Context::anonymous())` 带空上下文（Ch4.3）。那些多出来的参数都是后续章节按需引入的，主干「名字 → 构造器 → 跑出 `[2,4,6]`」完全一致。
 
 顺带，**同名巧合第三次出现**：`BuildFromPorts` 既是 trait（`flow_rs::registry`，类型命名空间）又是派生宏（`flow_derive`，宏命名空间），和 `Node`/`Actor` 一样共存——测试里两个都 `use` 了，各归其位。
 
 ## 7. 测试：两层
 
-- **单元测试**（`flow-derive/src/node.rs` 内）：`build_from_ports_wires_ports` 断言生成的 `build` 里标量端口按位置填、`input_closed: false`、端口名表按序；`node_register_emits_submit` 断言 `node_register!` 生成 `flow_rs::inventory::submit!` + `NodeRegistration` + `<D as ..BuildFromPorts>::build`。（这些断言在终点已随字段生长扩充——如今还核对 `INPUTS`/`OUTPUTS`/`INPUT_ARRAY` 等，跑 `cargo test -p flow-derive` 可见。）
+- **单元测试**（累积工程 `derive/src/lib.rs` 的 `mod tests` 内）：`build_from_ports_wires_ports_by_position` 断言生成的 `build` 里输入端口按位置 `ins.remove(0)`、输出端口 `Some(outs.remove(0))`、`input_closed: false`；`node_register_emits_submit` 断言 `node_register!` 生成 `flow_rs::inventory::submit!` + `flow_rs::registry::NodeRegistration` + `<Doubler as ..BuildFromPorts>::build`。（终点这些断言随字段生长扩充——还核对 `INPUTS`/`OUTPUTS`/`INPUT_ARRAY` 等，跑 `cargo test -p flow-derive --manifest-path code/Cargo.toml` 可见。）
 - **集成测试**（`register.rs`，2 个）：`doubler_is_registered` 验证 `find`/`registrations` 能按名字查到、查不到不存在的名字；`build_via_registry_and_run` 走完「名字 → 构造 → 跑出 `[2,4,6]`」。**注册是真的经过了 linker section**——集成测试是独立 crate，它的 `submit!` 与 flow-rs 里的 `collect!` 在链接时汇合，证明跨 crate 收集成立。
 
 ## 8. 本章终点与复现
 
-**起点**：Ch2.3 结束时的工程（五个节点宏，能塌缩出 `Doubler`）。
+**起点**：Ch2.3 结束时的累积工程（第二十步——五个节点宏，能塌缩出 `Doubler`）。
 
-**本章新增/改动的文件**：
+**两步长出注册表**（每步都是一份可编译、自带测试的文件，抄进累积工程跑通再走下一步）：
 
-- `code/flow-rs/src/registry.rs`——新模块：`NodeRegistration`、`inventory::collect!`、`BuildFromPorts` trait、`registrations`/`find`。
-- `code/flow-rs/src/lib.rs`——`pub mod registry;` + `pub use inventory;`（重导出让下游能用 `flow_rs::inventory::submit!`）+ `extern crate self as flow_rs;`（让绝对路径在本 crate 内也解析得通）。
-- `code/flow-derive/src/node.rs`——`#[derive(BuildFromPorts)]` 的 `expand_build_from_ports`、函数式宏 `node_register!` 的 `NodeRegisterArgs` + `expand_node_register`。
-- `code/flow-derive/src/lib.rs`——`#[proc_macro_derive(BuildFromPorts)]` 与 `#[proc_macro] node_register` 两个入口。
-- `code/flow-rs/tests/register.rs`——集成测试：注册 → 查找 → 构造 → 跑出 `[2,4,6]`。
+- **第二十一步**：给工程加 `inventory` 依赖（`Cargo.toml`）；新建 `src/registry.rs`（`NodeRegistration` + `inventory::collect!` + `registrations`/`find` + `BuildFromPorts` 契约），`src/lib.rs` 加 `pub mod registry;` + `pub use inventory;` + `extern crate self as flow_rs;`；`derive/src/lib.rs` 加 `#[derive(BuildFromPorts)]`。新增独立集成测试 `tests/register.rs`，先直接 `build()` 跑通「填端口 → 造节点」。
+- **第二十二步**：`derive/src/lib.rs` 加函数式宏 `node_register!`（第三种宏形态：`NodeRegisterArgs` 解析器 + `expand_node_register`）；`tests/register.rs` 补上 `node_register!("Doubler", Doubler)` 一行 + 按名字查找/构造/运行的端到端测试。
 
 **验收命令**（照抄可跑）：
 
 ```bash
-cargo test -p flow-derive --manifest-path code/Cargo.toml --locked                     # BuildFromPorts / node_register! 展开单测
-cargo test --manifest-path code/Cargo.toml -p flow-rs --test register --locked         # 跨 crate 注册端到端
+python3 scripts/check_basic_channel_course.py   # 从空目录累积构建二十二步，每步 cargo test
 ```
 
-正文里节点定义 + 注册 + 查找运行的集成测试、以及 `NodeRegisterArgs` 解析器均由 `{{#include}}` 直接取自真实文件。§3~§5 的 `NodeCtor`/`NodeRegistration`/`BuildFromPorts`/`expand_*` 代码块仍标注为**示意**——展示 Ch2.4 阶段的单端口简化形态，终点已按 Ch3.2/4.2/4.3 长出参数、`Result`、分组数组端口与资源注册表，差异见各处落差说明与 [注册表实作](ch04b-registry-workshop.md)。
+**对照成品**（可选）——全书终点的 `flow-derive` 单元测试与跨 crate 注册端到端：
+
+```bash
+cargo test -p flow-derive --manifest-path code/Cargo.toml --locked              # BuildFromPorts / node_register! 展开单测
+cargo test --manifest-path code/Cargo.toml -p flow-rs --test register --locked  # 跨 crate 注册端到端
+```
+
+正文 §3~§7 的每个代码块都由 `{{#include}}` 取自 labs 第二十一~二十二步的可编译文件，抄进去就能跑（§3 开头那份 `inventory-study/` 独立实验，是 `inventory` 这个第三方 crate 的入门示范，仍由仓库 `code/` 提供、`scripts/check_registry_course.py` 单独验证）。教学版是**单端口版**——`NodeCtor`/`NodeRegistration`/`BuildFromPorts::build`/`expand_*` 都用一维位置 `Vec`、无参数、`build` 不返回 `Result`；全书终点 `code/flow-rs/src/registry.rs` 与 `code/flow-derive/src/node.rs` 已按 Ch3.2/4.2/4.3 长出 `&Args`、`Result`、分组数组端口与对偶的资源注册表，差异见各处落差说明与 [注册表实作](ch04b-registry-workshop.md)。
 
 ## 小结
 

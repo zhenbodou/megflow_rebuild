@@ -1,0 +1,18 @@
+[package]
+name = "flow-rs"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["derive"]
+exclude = ["message"]
+
+[dependencies]
+flow-derive = { path = "derive" }
+flow-message = { path = "message" }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+thiserror = "2"
+inventory = "0.3"
+
+[dev-dependencies]
+futures-util = "0.3"
